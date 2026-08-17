@@ -21,11 +21,12 @@ Open **http://localhost:8080/** in Chrome. Mic access requires HTTPS in producti
 
 1. **Load audio folder** — pick the folder of lesson / instruction audio files
 2. **Select track** — tap the file that is (or will be) playing on the main amp
-3. **Back me up** — mic opens immediately while the file is analysed into **speech bursts** (length + loudness shape). Quiet gaps are not part of the fingerprint.
-4. Status stays **Waiting for speech** until the mic hears actual talking. Match % is hidden while it is quiet.
-5. When speech durations and intensities line up with the file, sync auto-starts. Backup plays silently behind by the buffer delay (up to 30 s).
-6. **Pauses in the lesson do not trigger cutout** while the file also has a pause at that spot. Cutout only fires if the mic goes quiet where the file still has speech.
-7. Tap **Take Over** to continue from the synced spot.
+3. **Back me up** — mic opens while the file is analysed into **speech bursts**. Match % only shows after 3 heard bursts.
+4. When confidence stays at/above threshold for the **hold** period (default 5 s, adjustable 3–10 s), sync **locks once** and silent backup starts.
+5. The backup file sits **behind** the amp by the buffer delay (`backup = room − buffer`). Confirm time is added to the room clock first, then the full buffer is subtracted — the file is never skipped forward. If that would be before 0:00, playback stays paused until the buffer has elapsed.
+6. After lock, the clock shows the **backup** position. Take-over jumps to the amp/room position (where it cut out).
+7. **Pauses in the lesson do not trigger cutout** while the file also has a pause at that spot.
+8. Tap **Take Over** to continue from the synced spot.
 
 ## Test it without an amp
 
@@ -47,4 +48,4 @@ Install from Chrome (**Install** / Add to Home screen). Works offline for the ap
 2. Tap **Install** (or menu → Add to Home screen)
 3. Stuck on an old build? force-reload or clear site data
 
-Version: **1.2.0**
+Version: **1.3.1**

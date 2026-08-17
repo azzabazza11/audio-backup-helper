@@ -303,12 +303,12 @@
   <details class="settings card">
     <summary>Settings</summary>
     <div class="setting-row">
-      <label for="bufferDelay">Buffer delay</label>
+      <label for="bufferDelay">Buffer delay (backup trails the amp)</label>
       <input type="range" id="bufferDelay" min="500" max="30000" step="500" value="1500" />
       <span class="val mono" id="bufferDelayVal">1.5 s</span>
     </div>
     <div class="setting-row">
-      <label for="silenceThreshold">Silence threshold</label>
+      <label for="silenceThreshold">Mic silence (RMS below this = quiet)</label>
       <input type="range" id="silenceThreshold" min="0.005" max="0.08" step="0.005" value="0.02" />
       <span class="val mono" id="silenceThresholdVal">0.02</span>
     </div>
@@ -327,9 +327,14 @@
       <input type="range" id="matchThreshold" min="0.25" max="0.7" step="0.05" value="0.45" />
       <span class="val mono" id="matchThresholdVal">0.45</span>
     </div>
+    <div class="setting-row">
+      <label for="confirmHold">Hold confidence before lock</label>
+      <input type="range" id="confirmHold" min="3000" max="10000" step="500" value="5000" />
+      <span class="val mono" id="confirmHoldVal">5 s</span>
+    </div>
   </details>
 
-  <p class="ver mono" id="appVer">v1.2.0</p>
+  <p class="ver mono" id="appVer">v1.3.1</p>
 
   <div class="bottom-bar">
     <button type="button" class="btn primary" id="btnMain" disabled>Back me up</button>
@@ -346,18 +351,17 @@
 
   <script>
     const $ = id => document.getElementById(id);
-    const APP_VER = '1.2.1';
+    const APP_VER = '1.3.1';
 
     const ENVELOPE_RATE = 20;
     const LISTEN_MS = 50;
     const MIN_BURST_SEC = 0.18;
     const MIN_LOCK_SPEECH_SEC = 0.4;
+    const MIN_LOCK_BURSTS = 3;
     const SHAPE_POINTS = 16;
     const MAX_MATCH_BURSTS = 4;
     const FILE_END_THRESHOLD = 0.97;
     const FILE_LOOKAHEAD_SEC = 0.8;
-    const MATCH_CONFIRM_TICKS = 2;
-    const DRIFT_SEARCH_SEC = 5;
 
     const state = {
       tracks: [],
@@ -369,7 +373,8 @@
         silenceThreshold: 0.02,
         silenceDurationMs: 800,
         fingerprintSec: 15,
-        matchThreshold: 0.45
+        matchThreshold: 0.45,
+        confirmHoldMs: 5000
       }
     };
 
@@ -389,7 +394,6 @@
     let trackedPosition = 0;
     let lastSpeechAt = 0;
     let silenceSince = null;
-    let matchStreak = 0;
     let lastMatchScore = 0;
     let lastMatchGated = true;
     let lastMatchBurstCount = 0;
@@ -399,9 +403,14 @@
     let startBursts = [];
     let liveBurst = null;
     let completedMicBursts = [];
-    let armClockAt = 0;
-    let armPositionAt = 0;
     let listenTimer = null;
+    let confirmStartedAt = null;
+    let confirmPositionSec = 0;
+    let lockPositionSec = 0;
+    let lockClockAt = 0;
+    let lockedBufferMs = 0;
+    let trackingLocked = false;
+    let pendingPlayTimer = null;
 
     function fmtTime(sec) {
       if (!isFinite(sec) || sec < 0) sec = 0;
@@ -436,16 +445,28 @@
     function syncLineText() {
       if (state.analysing) return 'Reading the file’s speech bursts…';
       if (state.mode === 'primed') {
-        if (lastMatchGated) return 'Heard: quiet · match waits for speech (silence is ignored)';
+        if (lastMatchGated) {
+          if (lastMatchBurstCount > 0 && lastMatchBurstCount < MIN_LOCK_BURSTS) {
+            return 'Heard: speech · need ' + MIN_LOCK_BURSTS + ' bursts (' + lastMatchBurstCount + ' so far)';
+          }
+          return 'Heard: quiet · match waits for speech (silence is ignored)';
+        }
+        if (confirmStartedAt) {
+          const heldMs = Date.now() - confirmStartedAt;
+          const needMs = state.settings.confirmHoldMs;
+          return 'Confirming… ' + (heldMs / 1000).toFixed(1) + ' / ' + (needMs / 1000).toFixed(1) + ' s · match ' + Math.round(lastMatchScore * 100) + '% · ' + lastMatchBurstCount + ' bursts';
+        }
         const n = lastMatchBurstCount;
         const burstBit = n ? ' · ' + n + ' speech burst' + (n === 1 ? '' : 's') : '';
         return 'Heard: speech · match ' + Math.round(lastMatchScore * 100) + '%' + burstBit;
       }
       if (state.mode === 'armed') {
-        const behind = (state.settings.bufferDelayMs / 1000).toFixed(1) + ' s behind';
-        if (!fileExpectsSpeech) return 'In sync · file pause (cutout ignored) · ' + behind;
-        if (silenceSince) return 'File expects speech · mic quiet · ' + behind;
-        return 'In sync · file speech · ' + behind;
+        const trailSec = lockedBufferMs / 1000;
+        const backupSec = backupAudio ? backupAudio.currentTime : Math.max(0, roomPosition() - trailSec);
+        let line = 'Locked · backup at ' + fmtTime(backupSec) + ' · ' + trailSec.toFixed(1) + ' s behind the amp';
+        if (!fileExpectsSpeech) return line + ' · file pause (cutout ignored)';
+        if (silenceSince) return line + ' · file expects speech · mic quiet';
+        return line;
       }
       if (state.mode === 'cutout') return 'Lost logical sync — silence where the file still has speech';
       return '';
@@ -477,15 +498,23 @@
         btn.disabled = !hasSelection;
       } else if (state.mode === 'primed') {
         pill.classList.add('waiting');
-        $('statusText').textContent = state.analysing ? 'Analysing track' : 'Waiting for speech';
+        if (state.analysing) {
+          $('statusText').textContent = 'Analysing track';
+        } else if (confirmStartedAt) {
+          const heldMs = Date.now() - confirmStartedAt;
+          $('statusText').textContent = 'Confirming… ' + (heldMs / 1000).toFixed(1) + ' / ' + (state.settings.confirmHoldMs / 1000).toFixed(1) + ' s';
+        } else {
+          $('statusText').textContent = 'Waiting for speech';
+        }
         btn.textContent = 'Cancel';
         btn.className = 'btn';
         btn.disabled = false;
       } else if (state.mode === 'armed') {
         pill.classList.add('listening');
+        const trailSec = lockedBufferMs / 1000;
         $('statusText').textContent = fileExpectsSpeech
-          ? ('Listening · ' + (state.settings.bufferDelayMs / 1000).toFixed(1) + ' s behind')
-          : 'Listening · expected pause';
+          ? ('Listening · backup ' + trailSec.toFixed(1) + ' s behind amp')
+          : ('Listening · expected pause · ' + trailSec.toFixed(1) + ' s behind');
         btn.textContent = 'Disarm';
         btn.className = 'btn';
         btn.disabled = false;
@@ -822,10 +851,19 @@
       return false;
     }
 
-    function nearbyFileBursts(centerSec) {
-      return fileBursts.filter(b =>
-        b.end > centerSec - DRIFT_SEARCH_SEC && b.start < centerSec + DRIFT_SEARCH_SEC
-      );
+    function roomPosition() {
+      if (backupAudio && trackingLocked && !backupAudio.ended && !backupAudio.paused) {
+        return backupAudio.currentTime + lockedBufferMs / 1000;
+      }
+      if (trackingLocked && lockClockAt) {
+        return lockPositionSec + (Date.now() - lockClockAt) / 1000;
+      }
+      return trackedPosition;
+    }
+
+    function backupPosition() {
+      if (backupAudio && trackingLocked) return backupAudio.currentTime;
+      return Math.max(0, roomPosition() - lockedBufferMs / 1000);
     }
 
     function noteMicEnergy(rms) {
@@ -854,29 +892,18 @@
       return false;
     }
 
-    function liveFilePosition() {
-      if (backupAudio && !backupAudio.paused && !backupAudio.ended) {
-        return backupAudio.currentTime + state.settings.bufferDelayMs / 1000;
-      }
-      if (state.mode === 'armed' || state.mode === 'cutout') {
-        return armPositionAt + (Date.now() - armClockAt) / 1000;
-      }
-      return trackedPosition;
-    }
-
     function updateProgressDisplay() {
       const dur = fileDuration || selectedTrack()?.duration || 0;
-      const pos = state.mode === 'backing' && backupAudio ? backupAudio.currentTime : trackedPosition;
+      let pos = trackedPosition;
+      if (state.mode === 'backing' && backupAudio) pos = backupAudio.currentTime;
+      else if ((state.mode === 'armed' || state.mode === 'cutout') && trackingLocked) pos = backupPosition();
       $('timeCurrent').textContent = fmtTime(pos);
       $('progressFill').style.width = dur ? Math.min(100, (pos / dur) * 100) + '%' : '0%';
     }
 
     function syncBackupPlayer() {
-      if (!backupAudio || state.mode === 'cutout') return;
-      const target = Math.max(0, trackedPosition - state.settings.bufferDelayMs / 1000);
-      if (Math.abs(backupAudio.currentTime - target) > 0.45) {
-        backupAudio.currentTime = target;
-      }
+      if (!backupAudio || state.mode === 'cutout' || !trackingLocked) return;
+      if (pendingPlayTimer) return;
       if (backupAudio.paused && state.mode === 'armed') {
         backupAudio.play().catch(() => {});
       }
@@ -887,12 +914,12 @@
       const pct = Math.min(100, (rms / 0.15) * 100);
       $('micMeterFill').style.width = pct + '%';
 
-      const burstEnded = noteMicEnergy(rms);
+      noteMicEnergy(rms);
       if (rms > state.settings.silenceThreshold) lastSpeechAt = Date.now();
       if (state.analysing) return;
 
       if (state.mode === 'primed') tickPrimed(rms);
-      else if (state.mode === 'armed') tickArmed(rms, burstEnded);
+      else if (state.mode === 'armed') tickArmed(rms);
 
       updateProgressDisplay();
     }
@@ -903,51 +930,85 @@
         lastMatchGated = true;
         lastMatchScore = 0;
         lastMatchBurstCount = 0;
-        matchStreak = 0;
+        confirmStartedAt = null;
         updateUI();
         return;
       }
 
       const match = matchBurstSequence(micBursts, startBursts);
-      lastMatchGated = match.gated;
-      lastMatchScore = match.score;
+      lastMatchGated = match.gated || micBursts.length < MIN_LOCK_BURSTS;
+      lastMatchScore = lastMatchGated ? 0 : match.score;
       lastMatchBurstCount = match.count;
       updateUI();
 
       const enoughSpeech = speechSeconds(micBursts) >= MIN_LOCK_SPEECH_SEC;
       const hearing = rms > state.settings.silenceThreshold || !!liveBurst;
-      if (!match.gated && enoughSpeech && hearing && match.score >= state.settings.matchThreshold) {
-        matchStreak++;
-        if (matchStreak >= MATCH_CONFIRM_TICKS) {
-          activateSync(match.position);
-        }
+      const canHold = !lastMatchGated
+        && micBursts.length >= MIN_LOCK_BURSTS
+        && enoughSpeech
+        && hearing
+        && match.score >= state.settings.matchThreshold;
+
+      if (!canHold) {
+        confirmStartedAt = null;
+        return;
+      }
+
+      if (!confirmStartedAt) {
+        confirmStartedAt = Date.now();
+        confirmPositionSec = match.position;
+      }
+
+      const heldMs = Date.now() - confirmStartedAt;
+      if (heldMs >= state.settings.confirmHoldMs) {
+        activateSync(confirmPositionSec, heldMs);
       } else {
-        matchStreak = 0;
+        updateUI();
       }
     }
 
-    async function activateSync(startSec) {
-      trackedPosition = startSec;
-      armPositionAt = startSec;
-      armClockAt = Date.now();
+    async function activateSync(fingerprintSec, confirmMs) {
+      const roomNow = fingerprintSec + confirmMs / 1000;
+      const trailMs = state.settings.bufferDelayMs;
+      lockPositionSec = roomNow;
+      lockClockAt = Date.now();
+      lockedBufferMs = trailMs;
+      trackingLocked = true;
+      trackedPosition = Math.max(0, roomNow - trailMs / 1000);
       lastSpeechAt = Date.now();
       silenceSince = null;
-      matchStreak = 0;
+      confirmStartedAt = null;
       inLogicalSync = true;
 
+      if (pendingPlayTimer) {
+        clearTimeout(pendingPlayTimer);
+        pendingPlayTimer = null;
+      }
+
       if (backupAudio) {
-        const target = Math.max(0, startSec - state.settings.bufferDelayMs / 1000);
-        backupAudio.currentTime = target;
         backupAudio.volume = 0;
-        await backupAudio.play().catch(() => {});
+        const backupStart = roomNow - trailMs / 1000;
+        if (backupStart < 0) {
+          backupAudio.currentTime = 0;
+          backupAudio.pause();
+          pendingPlayTimer = setTimeout(() => {
+            pendingPlayTimer = null;
+            if (state.mode !== 'armed' || !backupAudio) return;
+            backupAudio.play().catch(() => {});
+          }, Math.round(-backupStart * 1000));
+        } else {
+          backupAudio.currentTime = backupStart;
+          await backupAudio.play().catch(() => {});
+        }
       }
 
       setMode('armed');
     }
 
-    function tickArmed(rms, burstEnded) {
-      trackedPosition = liveFilePosition();
-      fileExpectsSpeech = fileExpectsSpeechAt(trackedPosition);
+    function tickArmed(rms) {
+      const room = roomPosition();
+      trackedPosition = Math.max(0, room - lockedBufferMs / 1000);
+      fileExpectsSpeech = fileExpectsSpeechAt(room);
       const heardSpeech = rms > state.settings.silenceThreshold || !!liveBurst;
 
       if (heardSpeech) {
@@ -958,19 +1019,6 @@
         if (!silenceSince) silenceSince = Date.now();
       } else {
         silenceSince = null;
-      }
-
-      if (burstEnded && heardSpeech) {
-        const micBursts = currentMicBursts().slice(-3);
-        if (micBursts.length) {
-          const match = matchBurstSequence(micBursts, nearbyFileBursts(trackedPosition));
-          if (!match.gated && match.score >= Math.max(0.5, state.settings.matchThreshold)) {
-            trackedPosition = match.position;
-            armPositionAt = trackedPosition;
-            armClockAt = Date.now();
-            inLogicalSync = true;
-          }
-        }
       }
 
       syncBackupPlayer();
@@ -986,7 +1034,7 @@
       }
       const silentFor = Date.now() - silenceSince;
       if (silentFor < state.settings.silenceDurationMs) return;
-      if (fileDuration && trackedPosition / fileDuration > FILE_END_THRESHOLD) return;
+      if (fileDuration && roomPosition() / fileDuration > FILE_END_THRESHOLD) return;
 
       if (backupAudio) backupAudio.pause();
       inLogicalSync = false;
@@ -1057,9 +1105,15 @@
         trackedPosition = 0;
         lastSpeechAt = Date.now();
         silenceSince = null;
-        matchStreak = 0;
         inLogicalSync = false;
         fileExpectsSpeech = false;
+        confirmStartedAt = null;
+        confirmPositionSec = 0;
+        lockPositionSec = 0;
+        lockClockAt = 0;
+        lockedBufferMs = 0;
+        trackingLocked = false;
+        if (pendingPlayTimer) { clearTimeout(pendingPlayTimer); pendingPlayTimer = null; }
 
         state.analysing = false;
         renderTrackList();
@@ -1075,6 +1129,7 @@
 
     async function disarm(resetProgress) {
       if (listenTimer) { clearInterval(listenTimer); listenTimer = null; }
+      if (pendingPlayTimer) { clearTimeout(pendingPlayTimer); pendingPlayTimer = null; }
 
       if (backupAudio) {
         backupAudio.pause();
@@ -1102,20 +1157,26 @@
       if (resetProgress !== false) trackedPosition = 0;
 
       silenceSince = null;
-      matchStreak = 0;
       lastMatchScore = 0;
       lastMatchGated = true;
       lastMatchBurstCount = 0;
       inLogicalSync = false;
       fileExpectsSpeech = false;
+      confirmStartedAt = null;
+      confirmPositionSec = 0;
+      lockPositionSec = 0;
+      lockClockAt = 0;
+      lockedBufferMs = 0;
+      trackingLocked = false;
       setMode('idle');
       updateProgressDisplay();
     }
 
     async function takeOver() {
       if (!backupAudio) return;
+      if (pendingPlayTimer) { clearTimeout(pendingPlayTimer); pendingPlayTimer = null; }
       backupAudio.volume = 1;
-      backupAudio.currentTime = Math.max(0, trackedPosition);
+      backupAudio.currentTime = Math.max(0, roomPosition());
       await backupAudio.play();
       setMode('backing');
 
@@ -1137,8 +1198,6 @@
       silenceSince = null;
       lastSpeechAt = Date.now();
       inLogicalSync = true;
-      armPositionAt = trackedPosition;
-      armClockAt = Date.now();
       if (backupAudio) {
         backupAudio.volume = 0;
         backupAudio.play().catch(() => {});
@@ -1215,6 +1274,10 @@
     $('matchThreshold').addEventListener('input', e => {
       state.settings.matchThreshold = +e.target.value;
       $('matchThresholdVal').textContent = state.settings.matchThreshold.toFixed(2);
+    });
+    $('confirmHold').addEventListener('input', e => {
+      state.settings.confirmHoldMs = +e.target.value;
+      $('confirmHoldVal').textContent = fmtSettingMs(state.settings.confirmHoldMs);
     });
 
     if ('serviceWorker' in navigator) {
