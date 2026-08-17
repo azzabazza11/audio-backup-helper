@@ -237,7 +237,27 @@
     .test-row {
       display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap;
     }
-    .test-row .btn { flex: 1; min-width: 140px; }
+    .fp-viz { margin-top: 12px; }
+    .fp-meta {
+      font-size: 0.75rem; color: var(--muted); margin: 0 0 8px;
+    }
+    .fp-label {
+      font-size: 0.72rem; font-weight: 600; color: var(--muted);
+      margin: 6px 0 4px; text-transform: uppercase; letter-spacing: 0.04em;
+    }
+    .fp-lane {
+      position: relative; height: 32px;
+      background: var(--bg); border: 1px solid var(--line);
+      border-radius: 8px; overflow: hidden;
+    }
+    .fp-burst {
+      position: absolute; bottom: 4px;
+      border-radius: 3px 3px 1px 1px; min-width: 3px;
+      background: var(--accent);
+    }
+    .fp-burst.mic { background: var(--ok); }
+    .fp-burst.matched { box-shadow: 0 0 0 1px var(--ink); }
+    .fp-burst.skipped { opacity: 0.35; background: var(--muted); }
     .ver {
       margin: 8px 0 0;
       color: var(--muted);
@@ -295,6 +315,13 @@
       <div class="mic-meter-fill" id="micMeterFill"></div>
     </div>
     <p class="sync-line" id="syncLine" hidden></p>
+    <div class="fp-viz" id="fpViz" hidden>
+      <p class="fp-meta mono" id="fpMeta"></p>
+      <div class="fp-label">File fingerprint</div>
+      <div class="fp-lane" id="fpFileLane" aria-hidden="true"></div>
+      <div class="fp-label">Heard</div>
+      <div class="fp-lane" id="fpMicLane" aria-hidden="true"></div>
+    </div>
     <div class="test-row" id="testRow" hidden>
       <button type="button" class="btn" id="btnSimulate">Simulate main amp</button>
     </div>
@@ -334,7 +361,7 @@
     </div>
   </details>
 
-  <p class="ver mono" id="appVer">v1.3.2</p>
+  <p class="ver mono" id="appVer">v1.3.3</p>
 
   <div class="bottom-bar">
     <button type="button" class="btn primary" id="btnMain" disabled>Back me up</button>
@@ -351,7 +378,7 @@
 
   <script>
     const $ = id => document.getElementById(id);
-    const APP_VER = '1.3.2';
+    const APP_VER = '1.3.3';
 
     const ENVELOPE_RATE = 20;
     const LISTEN_MS = 50;
@@ -359,12 +386,13 @@
     const MIN_LOCK_SPEECH_SEC = 0.4;
     const MIN_LOCK_BURSTS = 3;
     const SHAPE_POINTS = 16;
-    const MAX_MATCH_BURSTS = 4;
+    const MAX_MATCH_BURSTS = 12;
     const FILE_END_THRESHOLD = 0.97;
     const FILE_LOOKAHEAD_SEC = 0.8;
     const CONFIRM_GRACE_MS = 2500;
     const RECENT_SPEECH_MS = 2500;
     const HOLD_CONTINUE_RATIO = 0.7;
+    const ALIGN_MATCH_FLOOR = 0.28;
 
     const state = {
       tracks: [],
@@ -400,6 +428,7 @@
     let lastMatchScore = 0;
     let lastMatchGated = true;
     let lastMatchBurstCount = 0;
+    let lastMatchAlign = { pairs: [], skippedMic: [], skippedFile: [] };
     let inLogicalSync = false;
     let fileExpectsSpeech = false;
     let fileBursts = [];
@@ -552,6 +581,7 @@
       $('micMeterWrap').hidden = !showMic;
       $('syncLine').hidden = !showMic;
       if (showMic) $('syncLine').textContent = syncLineText();
+      renderFingerprintViz();
       $('testRow').hidden = !hasSelection || state.mode === 'backing';
       const simPlaying = testAudio && !testAudio.paused;
       $('btnSimulate').textContent = simPlaying ? 'Pause simulation' : 'Simulate main amp';
@@ -791,12 +821,6 @@
       return mergeCloseBursts(list).slice(-MAX_MATCH_BURSTS);
     }
 
-    function relativeMeans(bursts) {
-      let max = 0.0001;
-      for (let i = 0; i < bursts.length; i++) if (bursts[i].mean > max) max = bursts[i].mean;
-      return bursts.map(b => b.mean / max);
-    }
-
     function pairBurstScore(micB, fileB) {
       const durScore = 1 - Math.min(1, Math.abs(micB.dur - fileB.dur) / Math.max(micB.dur, fileB.dur, 0.12));
       let shapeScore = 0;
@@ -807,48 +831,149 @@
       return 0.55 * durScore + 0.45 * shapeScore;
     }
 
-    function burstSequenceScore(micBursts, fileBursts) {
+    function alignBursts(micBursts, fileBursts) {
       const n = micBursts.length;
-      if (!n || n !== fileBursts.length) return 0;
-      let pairSum = 0;
-      for (let i = 0; i < n; i++) pairSum += pairBurstScore(micBursts[i], fileBursts[i]);
-      let pairScore = pairSum / n;
-      if (n >= 2) {
-        const riM = relativeMeans(micBursts);
-        const riF = relativeMeans(fileBursts);
-        let dot = 0, m = 0, f = 0;
-        for (let i = 0; i < n; i++) {
-          dot += riM[i] * riF[i];
-          m += riM[i] * riM[i];
-          f += riF[i] * riF[i];
+      const m = fileBursts.length;
+      const empty = { score: 0, matches: 0, position: 0, pairs: [], skippedMic: [], skippedFile: [] };
+      if (!n || !m) return empty;
+
+      const dp = Array.from({ length: n + 1 }, () =>
+        Array.from({ length: m + 1 }, () => ({ val: 0, matches: 0, via: null }))
+      );
+
+      for (let i = 0; i <= n; i++) {
+        for (let j = 0; j <= m; j++) {
+          if (i === 0 && j === 0) continue;
+          let best = { val: -1e9, matches: 0, via: null };
+          if (i > 0) {
+            const p = dp[i - 1][j];
+            const cand = { val: p.val, matches: p.matches, via: 'mic' };
+            if (cand.val > best.val) best = cand;
+          }
+          if (j > 0) {
+            const p = dp[i][j - 1];
+            const cand = { val: p.val, matches: p.matches, via: 'file' };
+            if (cand.val > best.val) best = cand;
+          }
+          if (i > 0 && j > 0) {
+            const pair = pairBurstScore(micBursts[i - 1], fileBursts[j - 1]);
+            if (pair >= ALIGN_MATCH_FLOOR) {
+              const p = dp[i - 1][j - 1];
+              const cand = { val: p.val + pair, matches: p.matches + 1, via: 'match' };
+              if (cand.val > best.val || (Math.abs(cand.val - best.val) < 1e-9 && cand.matches > best.matches)) {
+                best = cand;
+              }
+            }
+          }
+          dp[i][j] = best.via ? best : { val: 0, matches: 0, via: null };
         }
-        const intScore = dot / (Math.sqrt(m * f) || 1);
-        pairScore = 0.7 * pairScore + 0.3 * intScore;
-      } else {
-        pairScore *= 0.82;
       }
-      return pairScore;
+
+      const pairs = [];
+      const skippedMic = [];
+      const skippedFile = [];
+      let i = n;
+      let j = m;
+      while (i > 0 || j > 0) {
+        const cell = dp[i][j];
+        if (!cell.via) break;
+        if (cell.via === 'match') {
+          pairs.push({ micIdx: i - 1, fileIdx: j - 1 });
+          i--;
+          j--;
+        } else if (cell.via === 'mic') {
+          skippedMic.push(i - 1);
+          i--;
+        } else {
+          skippedFile.push(j - 1);
+          j--;
+        }
+      }
+      pairs.reverse();
+      skippedMic.reverse();
+      skippedFile.reverse();
+
+      const cell = dp[n][m];
+      let score = 0;
+      if (cell.matches > 0) {
+        score = cell.val / cell.matches;
+        if (cell.matches < MIN_LOCK_BURSTS) score *= cell.matches / MIN_LOCK_BURSTS;
+      }
+      let position = 0;
+      if (pairs.length) {
+        const last = pairs[pairs.length - 1];
+        const f = fileBursts[last.fileIdx];
+        const mb = micBursts[last.micIdx];
+        position = f.start + Math.min(mb.dur, f.dur);
+      }
+      return { score, matches: cell.matches, position, pairs, skippedMic, skippedFile };
+    }
+
+    function fpWindowSec() {
+      return Math.max(1, state.settings.fingerprintSec);
+    }
+
+    function paintBurstLane(lane, bursts, windowSec, t0, kind, matchedIdx, skippedIdx) {
+      lane.innerHTML = '';
+      if (!bursts.length || !windowSec) return;
+      let peak = 0.0001;
+      for (let i = 0; i < bursts.length; i++) if (bursts[i].mean > peak) peak = bursts[i].mean;
+      const matched = {};
+      const skipped = {};
+      (matchedIdx || []).forEach(i => { matched[i] = true; });
+      (skippedIdx || []).forEach(i => { skipped[i] = true; });
+      bursts.forEach((b, i) => {
+        const el = document.createElement('span');
+        el.className = 'fp-burst' + (kind === 'mic' ? ' mic' : '');
+        if (skipped[i]) el.classList.add('skipped');
+        else if (matched[i]) el.classList.add('matched');
+        const left = Math.max(0, (b.start - t0) / windowSec * 100);
+        const width = Math.max(0.6, b.dur / windowSec * 100);
+        el.style.left = left + '%';
+        el.style.width = Math.min(100 - left, width) + '%';
+        el.style.height = Math.max(6, Math.round((b.mean / peak) * 24)) + 'px';
+        lane.appendChild(el);
+      });
+    }
+
+    function renderFingerprintViz() {
+      const viz = $('fpViz');
+      if (!viz) return;
+      const show = (state.mode === 'primed' || state.mode === 'armed' || state.mode === 'cutout') && startBursts && startBursts.length;
+      viz.hidden = !show;
+      if (!show) return;
+      const windowSec = fpWindowSec();
+      const align = lastMatchAlign || { pairs: [], skippedMic: [], skippedFile: [] };
+      const matchedFile = (align.pairs || []).map(p => p.fileIdx);
+      const matchedMic = (align.pairs || []).map(p => p.micIdx);
+      paintBurstLane($('fpFileLane'), startBursts, windowSec, 0, 'file', matchedFile, align.skippedFile);
+      const mic = currentMicBursts();
+      const micT0 = mic.length ? mic[0].start : 0;
+      paintBurstLane($('fpMicLane'), mic, windowSec, micT0, 'mic', matchedMic, align.skippedMic);
+      const paired = (align.pairs || []).length;
+      const skipped = (align.skippedMic || []).length;
+      $('fpMeta').textContent =
+        'First ' + windowSec + ' s of file · ' + startBursts.length + ' file bursts · search 20/s · ' +
+        paired + ' paired' + (skipped ? (' · ' + skipped + ' heard skipped') : '');
     }
 
     function matchBurstSequence(micBursts, fileBurstList) {
-      if (!micBursts.length) return { position: 0, score: 0, gated: true, count: 0 };
-      if (!fileBurstList.length) return { position: 0, score: 0, gated: false, count: micBursts.length };
-      const n = micBursts.length;
-      if (fileBurstList.length < n) return { position: 0, score: 0, gated: false, count: n };
-
-      let bestScore = 0;
-      let bestPos = 0;
-      for (let i = 0; i <= fileBurstList.length - n; i++) {
-        const slice = fileBurstList.slice(i, i + n);
-        const score = burstSequenceScore(micBursts, slice);
-        if (score > bestScore) {
-          bestScore = score;
-          const lastF = slice[n - 1];
-          const lastM = micBursts[n - 1];
-          bestPos = lastF.start + Math.min(lastM.dur, lastF.dur);
-        }
+      if (!micBursts.length) {
+        return { position: 0, score: 0, gated: true, count: 0, pairs: [], skippedMic: [], skippedFile: [] };
       }
-      return { position: bestPos, score: bestScore, gated: false, count: n };
+      if (!fileBurstList.length) {
+        return { position: 0, score: 0, gated: false, count: micBursts.length, pairs: [], skippedMic: [], skippedFile: [] };
+      }
+      const aligned = alignBursts(micBursts, fileBurstList);
+      return {
+        position: aligned.position,
+        score: aligned.score,
+        gated: false,
+        count: aligned.matches,
+        pairs: aligned.pairs,
+        skippedMic: aligned.skippedMic,
+        skippedFile: aligned.skippedFile
+      };
     }
 
     function speechSeconds(bursts) {
@@ -943,21 +1068,30 @@
 
     function tickPrimed(rms) {
       const micBursts = currentMicBursts();
-      if (!micBursts.length || !startBursts.length) {
+      if (!startBursts.length) {
         lastMatchGated = true;
         lastMatchScore = 0;
         lastMatchBurstCount = 0;
+        lastMatchAlign = { pairs: [], skippedMic: [], skippedFile: [] };
         resetConfirmHold();
+        updateUI();
+        return;
+      }
+      if (!micBursts.length) {
+        lastMatchGated = true;
+        lastMatchBurstCount = 0;
+        lastMatchAlign = { pairs: [], skippedMic: [], skippedFile: [] };
         updateUI();
         return;
       }
 
       const match = matchBurstSequence(micBursts, startBursts);
+      lastMatchAlign = match;
       lastMatchBurstCount = match.count;
-      const enoughBursts = micBursts.length >= MIN_LOCK_BURSTS;
-      lastMatchGated = match.gated || !enoughBursts;
-      if (!lastMatchGated) lastMatchScore = match.score;
+      lastMatchGated = match.gated;
+      if (!match.gated) lastMatchScore = match.score;
 
+      const enoughPairs = match.count >= MIN_LOCK_BURSTS;
       const enoughSpeech = speechSeconds(micBursts) >= MIN_LOCK_SPEECH_SEC;
       const hearing = rms > state.settings.silenceThreshold || !!liveBurst;
       const recentSpeech = hearing || (Date.now() - lastSpeechAt < RECENT_SPEECH_MS);
@@ -965,7 +1099,7 @@
       const aboveStart = score >= state.settings.matchThreshold;
       const aboveContinue = score >= state.settings.matchThreshold * HOLD_CONTINUE_RATIO;
 
-      const canStart = !match.gated && enoughBursts && enoughSpeech && recentSpeech && aboveStart;
+      const canStart = !match.gated && enoughPairs && enoughSpeech && recentSpeech && aboveStart;
       const canContinue = !!confirmStartedAt && recentSpeech && (aboveContinue || aboveStart);
 
       const now = Date.now();
@@ -1127,6 +1261,7 @@
         fileBursts = extractBursts(fileEnvelope, fileSpeechThreshold);
         const fpEnd = Math.min(fileEnvelope.length, Math.ceil(state.settings.fingerprintSec * ENVELOPE_RATE));
         startBursts = extractBursts(fileEnvelope, fileSpeechThreshold, 0, fpEnd);
+        lastMatchAlign = { pairs: [], skippedMic: [], skippedFile: [] };
         track.duration = fileDuration;
 
         backupAudio = new Audio(track.url);
