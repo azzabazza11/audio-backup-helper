@@ -238,6 +238,13 @@
       display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap;
     }
     .test-row .btn { flex: 1; min-width: 140px; }
+    .ver {
+      margin: 8px 0 0;
+      color: var(--muted);
+      font-size: 0.78rem;
+      opacity: 0.7;
+      text-align: center;
+    }
 
     @media (prefers-reduced-motion: reduce) {
       *, *::before, *::after {
@@ -321,6 +328,8 @@
     </div>
   </details>
 
+  <p class="ver mono" id="appVer">v1.2.0</p>
+
   <div class="bottom-bar">
     <button type="button" class="btn primary" id="btnMain" disabled>Back me up</button>
   </div>
@@ -336,6 +345,7 @@
 
   <script>
     const $ = id => document.getElementById(id);
+    const APP_VER = '1.2.0';
 
     const ENVELOPE_RATE = 20;
     const LISTEN_MS = 50;
@@ -1207,7 +1217,7 @@
     });
 
     if ('serviceWorker' in navigator) {
-      navigator.serviceWorker.register('./service-worker.js').catch(() => {});
+      navigator.serviceWorker.register('./service-worker.js?v=' + APP_VER).catch(() => {});
     }
 
     document.addEventListener('visibilitychange', () => {
