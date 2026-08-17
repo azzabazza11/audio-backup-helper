@@ -309,7 +309,7 @@
 
   <section class="card" id="setupCard">
     <h2>Audio folder</h2>
-    <p class="hint">Load the folder of instruction audio. Pick the track, then arm backup. The file is analysed so pauses in the lesson are expected — cutout only fires if the mic goes quiet where the file still has speech.</p>
+    <p class="hint">Load the folder of instruction audio. Pick the track, then arm backup. The first ~30 s of the file becomes a peak-hash fingerprint (mini-Shazam). The mic records short clips and only matching clips count toward lock — talking and other room noise is ignored. Cutout only fires if the mic goes quiet where the file still has speech.</p>
     <button type="button" class="btn primary" id="btnLoadFolder" style="margin-top:12px;width:100%">Load audio folder</button>
     <input type="file" id="folderInput" webkitdirectory multiple accept="audio/*" hidden />
     <ul class="track-list" id="trackList" hidden></ul>
@@ -373,15 +373,21 @@
       <span class="val mono" id="silenceDurationVal">800 ms</span>
     </div>
     <div class="setting-row">
-      <label for="fingerprintSec">Start fingerprint length</label>
-      <input type="range" id="fingerprintSec" min="10" max="20" step="1" value="15" />
-      <span class="val mono" id="fingerprintSecVal">15 s</span>
+      <label for="fingerprintSec">File fingerprint length</label>
+      <input type="range" id="fingerprintSec" min="15" max="30" step="1" value="30" />
+      <span class="val mono" id="fingerprintSecVal">30 s</span>
     </div>
     <div class="setting-row">
-      <label for="matchThreshold">Start match confidence</label>
-      <input type="range" id="matchThreshold" min="0.25" max="0.7" step="0.05" value="0.45" />
-      <span class="val mono" id="matchThresholdVal">0.45</span>
+      <label for="clipSec">Mic clip to match</label>
+      <input type="range" id="clipSec" min="2" max="8" step="1" value="4" />
+      <span class="val mono" id="clipSecVal">4 s</span>
     </div>
+    <div class="setting-row">
+      <label for="matchThreshold">Clip match score</label>
+      <input type="range" id="matchThreshold" min="0.25" max="0.7" step="0.05" value="0.4" />
+      <span class="val mono" id="matchThresholdVal">0.40</span>
+    </div>
+    <p class="hint cal-hint">Lock uses peak-hash clips (not talking). Raise this if speech still locks; lower it if the real file is not recognised through the amp.</p>
     <div class="setting-row">
       <label for="confirmHold">Hold match before lock</label>
       <input type="range" id="confirmHold" min="3000" max="10000" step="500" value="5000" />
@@ -389,7 +395,7 @@
     </div>
   </details>
 
-  <p class="ver mono" id="appVer">v1.3.5</p>
+  <p class="ver mono" id="appVer">v1.4.0</p>
 
   <div class="bottom-bar">
     <button type="button" class="btn primary" id="btnMain" disabled>Back me up</button>
@@ -406,7 +412,7 @@
 
   <script>
     const $ = id => document.getElementById(id);
-    const APP_VER = '1.3.5';
+    const APP_VER = '1.4.0';
 
     const ENVELOPE_RATE = 20;
     const LISTEN_MS = 50;
@@ -426,6 +432,14 @@
     const AMBIENT_SAMPLES = 40;
     const AMBIENT_MULT = 2.4;
     const MIC_METER_MAX = 0.15;
+    const FP_SR = 16000;
+    const FP_FFT = 2048;
+    const FP_HOP = 512;
+    const FP_PEAKS = 5;
+    const FP_FAN = 6;
+    const FP_DT_MAX = 35;
+    const FP_BIN_Q = 3;
+    const FP_HOP_SEC = FP_HOP / FP_SR;
 
     const state = {
       tracks: [],
@@ -436,8 +450,9 @@
         bufferDelayMs: 1500,
         silenceThreshold: 0.02,
         silenceDurationMs: 800,
-        fingerprintSec: 15,
-        matchThreshold: 0.45,
+        fingerprintSec: 30,
+        clipSec: 4,
+        matchThreshold: 0.4,
         confirmHoldMs: 5000
       }
     };
@@ -482,6 +497,18 @@
     let lockedBufferMs = 0;
     let trackingLocked = false;
     let pendingPlayTimer = null;
+    let captureNode = null;
+    let captureGain = null;
+    let templateIndex = null;
+    let templateHopSec = 0;
+    let clipCollecting = false;
+    let clipParts = [];
+    let clipLength = 0;
+    let clipBusy = false;
+    let lastClipHits = 0;
+    let lastClipOffset = 0;
+    let lastClipStatus = 'waiting';
+    let lastClipContrast = 0;
 
     function fmtTime(sec) {
       if (!isFinite(sec) || sec < 0) sec = 0;
@@ -522,22 +549,20 @@
     }
 
     function syncLineText() {
-      if (state.analysing) return 'Reading the file’s speech bursts…';
+      if (state.analysing) return 'Building a Shazam-style fingerprint of the first ' + state.settings.fingerprintSec + ' s…';
       if (state.mode === 'primed') {
+        if (clipCollecting) return 'Recording ' + state.settings.clipSec + ' s clip to match the file…';
+        if (lastClipStatus === 'waiting') return 'Waiting for audio above the silence gate, then a ' + state.settings.clipSec + ' s clip';
         const matchPct = Math.round(lastMatchScore * 100);
-        if (lastMatchGated && lastMatchBurstCount > 0 && lastMatchBurstCount < MIN_LOCK_BURSTS) {
-          return 'Match waits for ' + MIN_LOCK_BURSTS + ' speech bursts (' + lastMatchBurstCount + ' so far)';
-        }
+        const clipBit = 'clip ' + matchPct + '% · ' + lastClipHits + ' peak-hits · ×' + lastClipContrast.toFixed(1);
         if (confirmStartedAt) {
           const needMs = state.settings.confirmHoldMs;
           const holdBit = 'hold ' + (confirmHeldMs / 1000).toFixed(1) + ' / ' + (needMs / 1000).toFixed(1) + ' s';
-          if (confirmBadSince) {
-            return 'Match ' + matchPct + '% · ' + holdBit + ' (paused through a gap)';
-          }
-          return 'Match ' + matchPct + '% · ' + holdBit + ' · ' + lastMatchBurstCount + ' bursts';
+          if (confirmBadSince) return clipBit + ' · ' + holdBit + ' (last clip missed)';
+          return clipBit + ' · ' + holdBit + ' · file @ ' + fmtTime(lastClipOffset);
         }
-        if (lastMatchGated) return 'Heard: quiet · match waits for speech';
-        return 'Match ' + matchPct + '% · hold not started yet · ' + lastMatchBurstCount + ' bursts';
+        if (lastClipStatus === 'miss') return clipBit + ' · not the file (talking/noise ignored)';
+        return clipBit + ' · need another matching clip to lock';
       }
       if (state.mode === 'armed') {
         const trailSec = lockedBufferMs / 1000;
@@ -579,14 +604,18 @@
         pill.classList.add('waiting');
         if (state.analysing) {
           $('statusText').textContent = 'Analysing track';
+        } else if (clipCollecting) {
+          $('statusText').textContent = 'Recording ' + state.settings.clipSec + ' s clip';
         } else if (confirmStartedAt) {
           const held = (confirmHeldMs / 1000).toFixed(1);
           const need = (state.settings.confirmHoldMs / 1000).toFixed(1);
           $('statusText').textContent = confirmBadSince
             ? ('Hold paused ' + held + ' / ' + need + ' s')
-            : ('Holding match… ' + held + ' / ' + need + ' s');
+            : ('Clip matched… ' + held + ' / ' + need + ' s');
+        } else if (lastClipStatus === 'miss') {
+          $('statusText').textContent = 'Clip was not the file';
         } else {
-          $('statusText').textContent = 'Waiting for speech';
+          $('statusText').textContent = 'Waiting for a clip';
         }
         btn.textContent = 'Cancel';
         btn.className = 'btn';
@@ -829,6 +858,271 @@
       return num / Math.sqrt(da * db);
     }
 
+    function resampleTo(samples, fromRate, toRate) {
+      if (!samples || !samples.length) return new Float32Array(0);
+      if (Math.abs(fromRate - toRate) < 0.5) {
+        return samples instanceof Float32Array ? samples : new Float32Array(samples);
+      }
+      const n = Math.max(1, Math.round(samples.length * toRate / fromRate));
+      const out = new Float32Array(n);
+      const step = fromRate / toRate;
+      for (let i = 0; i < n; i++) {
+        const start = i * step;
+        const end = Math.min(samples.length, (i + 1) * step);
+        const j0 = Math.max(0, Math.floor(start));
+        const j1 = Math.min(samples.length, Math.max(j0 + 1, Math.ceil(end)));
+        let s = 0, c = 0;
+        for (let j = j0; j < j1; j++) { s += samples[j]; c++; }
+        out[i] = c ? s / c : 0;
+      }
+      return out;
+    }
+
+    function fftRadix2(re, im) {
+      const n = re.length;
+      for (let i = 1, j = 0; i < n; i++) {
+        let bit = n >> 1;
+        for (; j & bit; bit >>= 1) j ^= bit;
+        j ^= bit;
+        if (i < j) {
+          const tr = re[i]; re[i] = re[j]; re[j] = tr;
+          const ti = im[i]; im[i] = im[j]; im[j] = ti;
+        }
+      }
+      for (let len = 2; len <= n; len <<= 1) {
+        const ang = -2 * Math.PI / len;
+        const wlenRe = Math.cos(ang);
+        const wlenIm = Math.sin(ang);
+        for (let i = 0; i < n; i += len) {
+          let wr = 1, wi = 0;
+          const half = len >> 1;
+          for (let j = 0; j < half; j++) {
+            const ur = re[i + j], ui = im[i + j];
+            const vr = re[i + j + half] * wr - im[i + j + half] * wi;
+            const vi = re[i + j + half] * wi + im[i + j + half] * wr;
+            re[i + j] = ur + vr;
+            im[i + j] = ui + vi;
+            re[i + j + half] = ur - vr;
+            im[i + j + half] = ui - vi;
+            const nwr = wr * wlenRe - wi * wlenIm;
+            wi = wr * wlenIm + wi * wlenRe;
+            wr = nwr;
+          }
+        }
+      }
+    }
+
+    function constellationPeaks(samples, sampleRate) {
+      samples = resampleTo(samples, sampleRate, FP_SR);
+      const n = FP_FFT;
+      const hop = FP_HOP;
+      const win = new Float32Array(n);
+      for (let i = 0; i < n; i++) win[i] = 0.5 * (1 - Math.cos(2 * Math.PI * i / (n - 1)));
+      const binHz = FP_SR / n;
+      const minBin = Math.max(2, Math.floor(80 / binHz));
+      const maxBin = Math.min(n / 2 - 2, Math.floor(5000 / binHz));
+      const peaks = [];
+      const re = new Float32Array(n);
+      const im = new Float32Array(n);
+      let frame = 0;
+      for (let off = 0; off + n <= samples.length; off += hop, frame++) {
+        for (let i = 0; i < n; i++) {
+          re[i] = samples[off + i] * win[i];
+          im[i] = 0;
+        }
+        fftRadix2(re, im);
+        const mag = new Float32Array(maxBin + 2);
+        let avg = 0;
+        const count = maxBin - minBin + 1;
+        for (let b = minBin; b <= maxBin; b++) {
+          mag[b] = re[b] * re[b] + im[b] * im[b];
+          avg += mag[b];
+        }
+        avg /= count || 1;
+        const floor = avg * 1.4;
+        const local = [];
+        for (let b = minBin + 1; b < maxBin; b++) {
+          if (mag[b] > mag[b - 1] && mag[b] >= mag[b + 1] && mag[b] > floor) {
+            local.push({ f: Math.round(b / FP_BIN_Q) * FP_BIN_Q, m: mag[b], t: frame });
+          }
+        }
+        local.sort((a, b) => b.m - a.m);
+        for (let k = 0; k < Math.min(FP_PEAKS, local.length); k++) peaks.push(local[k]);
+      }
+      templateHopSec = FP_HOP_SEC;
+      return peaks;
+    }
+
+    function hashesFromPeaks(peaks) {
+      const out = [];
+      for (let i = 0; i < peaks.length; i++) {
+        const a = peaks[i];
+        for (let k = 1; k <= FP_FAN && i + k < peaks.length; k++) {
+          const b = peaks[i + k];
+          const dt = b.t - a.t;
+          if (dt < 1 || dt > FP_DT_MAX) continue;
+          const hash = (a.f * 100000 + b.f * 100 + dt) | 0;
+          out.push({ hash, t: a.t });
+        }
+      }
+      return out;
+    }
+
+    function buildTemplateIndex(buffer, sec) {
+      const sr = buffer.sampleRate;
+      const ch = buffer.getChannelData(0);
+      const n = Math.min(ch.length, Math.floor(Math.max(1, sec) * sr));
+      const slice = ch.subarray(0, n);
+      const peaks = constellationPeaks(slice, sr);
+      const hashes = hashesFromPeaks(peaks);
+      const index = new Map();
+      for (let i = 0; i < hashes.length; i++) {
+        const h = hashes[i];
+        let arr = index.get(h.hash);
+        if (!arr) { arr = []; index.set(h.hash, arr); }
+        arr.push(h.t);
+      }
+      return { index, hashCount: hashes.length, peakCount: peaks.length, duration: n / sr };
+    }
+
+    function matchClipToTemplate(samples, sampleRate, template) {
+      if (!template || !template.index.size) return { score: 0, hits: 0, contrast: 0, offsetSec: 0 };
+      const peaks = constellationPeaks(samples, sampleRate);
+      const hashes = hashesFromPeaks(peaks);
+      if (hashes.length < 8) return { score: 0, hits: 0, contrast: 0, offsetSec: 0 };
+      const votes = new Map();
+      let looked = 0;
+      for (let i = 0; i < hashes.length; i++) {
+        const found = template.index.get(hashes[i].hash);
+        if (!found) continue;
+        looked++;
+        for (let j = 0; j < found.length; j++) {
+          const off = found[j] - hashes[i].t;
+          votes.set(off, (votes.get(off) || 0) + 1);
+        }
+      }
+      const smoothed = off => (votes.get(off) || 0) + (votes.get(off - 1) || 0) + (votes.get(off + 1) || 0);
+      let bestOff = 0, best = 0;
+      votes.forEach((_, off) => {
+        const s = smoothed(off);
+        if (s > best) { best = s; bestOff = off; }
+      });
+      const hits = best;
+      const counts = [];
+      votes.forEach(c => counts.push(c));
+      counts.sort((a, b) => a - b);
+      const median = counts.length ? counts[Math.floor(counts.length / 2)] : 1;
+      const contrast = hits / Math.max(1, median);
+      const need = Math.max(80, state.settings.clipSec * 40);
+      const score = Math.min(1, hits / need);
+      return { score, hits, contrast, offsetSec: Math.max(0, bestOff * FP_HOP_SEC), looked };
+    }
+
+    function startClipCapture() {
+      if (!audioCtx || !micSource || captureNode) return;
+      const Ctx = audioCtx;
+      const makeProc = Ctx.createScriptProcessor || Ctx.webkitCreateScriptProcessor;
+      if (!makeProc) return;
+      const proc = makeProc.call(Ctx, 4096, 1, 1);
+      captureNode = proc;
+      captureGain = Ctx.createGain();
+      captureGain.gain.value = 0;
+      micSource.connect(captureNode);
+      captureNode.connect(captureGain);
+      captureGain.connect(Ctx.destination);
+      captureNode.onaudioprocess = ev => {
+        if (!clipCollecting || state.mode !== 'primed') return;
+        const data = ev.inputBuffer.getChannelData(0);
+        clipParts.push(new Float32Array(data));
+        clipLength += data.length;
+        const need = Math.floor(state.settings.clipSec * Ctx.sampleRate);
+        if (clipLength >= need) finishClip();
+      };
+    }
+
+    function stopClipCapture() {
+      if (captureNode) {
+        try { captureNode.disconnect(); } catch { /* ignore */ }
+        captureNode.onaudioprocess = null;
+      }
+      if (captureGain) try { captureGain.disconnect(); } catch { /* ignore */ }
+      captureNode = null;
+      captureGain = null;
+      clipCollecting = false;
+      clipParts = [];
+      clipLength = 0;
+      clipBusy = false;
+    }
+
+    function beginClipIfNeeded(rms) {
+      if (state.mode !== 'primed' || state.analysing || clipCollecting || clipBusy) return;
+      if (!templateIndex) return;
+      if (rms <= state.settings.silenceThreshold) return;
+      clipCollecting = true;
+      clipParts = [];
+      clipLength = 0;
+      lastClipStatus = 'recording';
+      updateUI();
+    }
+
+    function finishClip() {
+      if (clipBusy) return;
+      clipCollecting = false;
+      clipBusy = true;
+      const sr = audioCtx.sampleRate;
+      const need = Math.floor(state.settings.clipSec * sr);
+      const samples = new Float32Array(need);
+      let w = 0;
+      for (let i = 0; i < clipParts.length && w < need; i++) {
+        const part = clipParts[i];
+        const n = Math.min(part.length, need - w);
+        samples.set(part.subarray(0, n), w);
+        w += n;
+      }
+      clipParts = [];
+      clipLength = 0;
+      setTimeout(() => {
+        try {
+          const result = matchClipToTemplate(samples, sr, templateIndex);
+          applyClipMatch(result, need / sr * 1000);
+        } finally {
+          clipBusy = false;
+        }
+      }, 0);
+    }
+
+    function applyClipMatch(result, clipMs) {
+      lastMatchScore = result.score;
+      lastClipHits = result.hits;
+      lastClipOffset = result.offsetSec;
+      lastClipContrast = result.contrast || 0;
+      lastMatchGated = false;
+      const minHits = 50;
+      const good = result.score >= state.settings.matchThreshold && result.hits >= minHits && result.contrast >= 3;
+      const now = Date.now();
+      if (good) {
+        lastClipStatus = 'hit';
+        confirmBadSince = null;
+        if (!confirmStartedAt) {
+          confirmStartedAt = now;
+          confirmHeldMs = 0;
+        }
+        confirmHeldMs += clipMs;
+        confirmPositionSec = result.offsetSec + clipMs / 1000;
+        if (confirmHeldMs >= state.settings.confirmHoldMs) {
+          activateSync(confirmPositionSec, 0);
+          return;
+        }
+      } else {
+        lastClipStatus = 'miss';
+        if (confirmStartedAt) {
+          if (!confirmBadSince) confirmBadSince = now;
+          if (now - confirmBadSince >= CONFIRM_GRACE_MS) resetConfirmHold();
+        }
+      }
+      updateUI();
+    }
+
     function extractBursts(env, threshold, startIdx, endIdx) {
       const bursts = [];
       const enter = threshold;
@@ -1044,8 +1338,9 @@
       const paired = (align.pairs || []).length;
       const skipped = (align.skippedMic || []).length;
       $('fpMeta').textContent =
-        'First ' + windowSec + ' s of file · ' + startBursts.length + ' file bursts · search 20/s · ' +
-        paired + ' paired' + (skipped ? (' · ' + skipped + ' heard skipped') : '');
+        'First ' + windowSec + ' s of file · ' + startBursts.length + ' bursts · ' +
+        (templateIndex ? (templateIndex.hashCount + ' peak-hashes') : 'no hashes') +
+        ' · clip ' + lastClipHits + ' hits';
     }
 
     function matchBurstSequence(micBursts, fileBurstList) {
@@ -1154,76 +1449,30 @@
       if (rms > state.settings.silenceThreshold) lastSpeechAt = Date.now();
       if (state.analysing) return;
 
-      if (state.mode === 'primed') tickPrimed(rms);
-      else if (state.mode === 'armed') tickArmed(rms);
+      if (state.mode === 'primed') {
+        beginClipIfNeeded(rms);
+        tickPrimedViz();
+      } else if (state.mode === 'armed') tickArmed(rms);
 
       updateProgressDisplay();
     }
 
-    function tickPrimed(rms) {
+    function tickPrimedViz() {
       const micBursts = currentMicBursts();
       if (!startBursts.length) {
-        lastMatchGated = true;
-        lastMatchScore = 0;
-        lastMatchBurstCount = 0;
         lastMatchAlign = { pairs: [], skippedMic: [], skippedFile: [] };
-        resetConfirmHold();
         updateUI();
         return;
       }
       if (!micBursts.length) {
-        lastMatchGated = true;
         lastMatchBurstCount = 0;
         lastMatchAlign = { pairs: [], skippedMic: [], skippedFile: [] };
         updateUI();
         return;
       }
-
       const match = matchBurstSequence(micBursts, startBursts);
       lastMatchAlign = match;
       lastMatchBurstCount = match.count;
-      lastMatchGated = match.gated;
-      if (!match.gated) lastMatchScore = match.score;
-
-      const enoughPairs = match.count >= MIN_LOCK_BURSTS;
-      const enoughSpeech = speechSeconds(micBursts) >= MIN_LOCK_SPEECH_SEC;
-      const hearing = rms > state.settings.silenceThreshold || !!liveBurst;
-      const recentSpeech = hearing || (Date.now() - lastSpeechAt < RECENT_SPEECH_MS);
-      const score = match.gated ? 0 : match.score;
-      const aboveStart = score >= state.settings.matchThreshold;
-      const aboveContinue = score >= state.settings.matchThreshold * HOLD_CONTINUE_RATIO;
-
-      const canStart = !match.gated && enoughPairs && enoughSpeech && recentSpeech && aboveStart;
-      const canContinue = !!confirmStartedAt && recentSpeech && (aboveContinue || aboveStart);
-
-      const now = Date.now();
-
-      if (canStart || canContinue) {
-        confirmBadSince = null;
-        if (!confirmStartedAt) {
-          confirmStartedAt = now;
-          confirmLastTick = now;
-          confirmHeldMs = 0;
-          confirmPositionSec = match.position;
-        } else {
-          confirmHeldMs += now - confirmLastTick;
-          confirmLastTick = now;
-          if (aboveStart) confirmPositionSec = match.position;
-        }
-        if (confirmHeldMs >= state.settings.confirmHoldMs) {
-          activateSync(confirmPositionSec, confirmHeldMs);
-          return;
-        }
-        updateUI();
-        return;
-      }
-
-      if (confirmStartedAt) {
-        confirmLastTick = now;
-        if (!confirmBadSince) confirmBadSince = now;
-        if (now - confirmBadSince >= CONFIRM_GRACE_MS) resetConfirmHold();
-      }
-
       updateUI();
     }
 
@@ -1356,6 +1605,14 @@
         const fpEnd = Math.min(fileEnvelope.length, Math.ceil(state.settings.fingerprintSec * ENVELOPE_RATE));
         startBursts = extractBursts(fileEnvelope, fileSpeechThreshold, 0, fpEnd);
         lastMatchAlign = { pairs: [], skippedMic: [], skippedFile: [] };
+        templateIndex = buildTemplateIndex(fileBuffer, state.settings.fingerprintSec);
+        lastClipStatus = 'waiting';
+        lastClipHits = 0;
+        lastClipOffset = 0;
+        lastClipContrast = 0;
+        lastMatchScore = 0;
+        startClipCapture();
+        if (!captureNode) throw new Error('This browser cannot capture mic clips for matching.');
         track.duration = fileDuration;
 
         backupAudio = new Audio(track.url);
@@ -1393,6 +1650,8 @@
     async function disarm(resetProgress) {
       if (listenTimer) { clearInterval(listenTimer); listenTimer = null; }
       if (pendingPlayTimer) { clearTimeout(pendingPlayTimer); pendingPlayTimer = null; }
+      stopClipCapture();
+      templateIndex = null;
 
       if (backupAudio) {
         backupAudio.pause();
@@ -1532,6 +1791,10 @@
     $('fingerprintSec').addEventListener('input', e => {
       state.settings.fingerprintSec = +e.target.value;
       $('fingerprintSecVal').textContent = state.settings.fingerprintSec + ' s';
+    });
+    $('clipSec').addEventListener('input', e => {
+      state.settings.clipSec = +e.target.value;
+      $('clipSecVal').textContent = state.settings.clipSec + ' s';
     });
     $('matchThreshold').addEventListener('input', e => {
       state.settings.matchThreshold = +e.target.value;

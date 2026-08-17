@@ -21,8 +21,8 @@ Open **http://localhost:8080/** in Chrome. Mic access requires HTTPS in producti
 
 1. **Load audio folder** — pick the folder of lesson / instruction audio files
 2. **Select track** — tap the file that is (or will be) playing on the main amp
-3. **Back me up** — mic opens while the first 10–20 s of the file is turned into a **speech-burst fingerprint**. A two-row diagram shows file bursts vs heard bursts (paired vs skipped).
-4. Matching is skip-tolerant: a cough is skipped instead of breaking the sequence. Hold starts after **3 paired** bursts at/above threshold. Short gaps **pause** hold rather than resetting it.
+3. **Back me up** — the first 15–30 s of the file (default 30) is turned into a **peak-hash fingerprint** (mini-Shazam: loud frequency peaks paired across time). The burst diagram is only a loudness sketch.
+4. When the mic hears sound, the app records a **2–8 s clip** (default 4) of unique PCM and matches it against that fingerprint. Talking and other room noise should score low; the same file through the amp should pile votes on one time offset. Hold only advances on a hit. A miss pauses hold, then resets after a short grace.
 5. The backup file sits **behind** the amp by the buffer delay (`backup = room − buffer`). Confirm time is added to the room clock first, then the full buffer is subtracted — the file is never skipped forward. If that would be before 0:00, playback stays paused until the buffer has elapsed.
 6. After lock, the clock shows the **backup** position. Take-over jumps to the amp/room position (where it cut out).
 7. **Pauses in the lesson do not trigger cutout** while the file also has a pause at that spot.
@@ -32,7 +32,7 @@ Open **http://localhost:8080/** in Chrome. Mic access requires HTTPS in producti
 
 1. Load a track and tap **Back me up** (allow the mic)
 2. Turn the phone speaker up and tap **Simulate main amp** — it plays the same file out loud
-3. You should see **Heard: quiet** until speech starts, then a match % and a burst count, then **Listening**
+3. You should see a clip recording, then a **clip % / peak-hits** line. Talking should stay a miss; the simulated file should hit and then **Listening**
 4. Natural pauses in the recording should show **expected pause** / **file pause (cutout ignored)**
 5. **Pause simulation** during a spoken section — that should offer take-over, because the file still expects speech
 
@@ -48,4 +48,4 @@ Install from Chrome (**Install** / Add to Home screen). Works offline for the ap
 2. Tap **Install** (or menu → Add to Home screen)
 3. Stuck on an old build? force-reload or clear site data
 
-Version: **1.3.5**
+Version: **1.4.0**
