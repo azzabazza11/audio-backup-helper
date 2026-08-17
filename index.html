@@ -1,0 +1,937 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
+  <meta name="theme-color" content="#f3f0e8" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <meta name="apple-mobile-web-app-title" content="Back Me Up" />
+  <meta name="description" content="Arm a backup audio track, listen via mic, and take over if the main amplifier cuts out." />
+  <link rel="manifest" href="./manifest.webmanifest" />
+  <link rel="icon" href="./icon.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="./icon.svg" />
+  <title>Back Me Up — Audio Backup Helper</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&family=Outfit:wght@450;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg: #f3f0e8;
+      --paper: #fffcf7;
+      --ink: #161411;
+      --muted: #5f5a53;
+      --line: #ddd6c8;
+      --accent: #123c32;
+      --ok: #1b6b45;
+      --bad: #b42318;
+      --warn: #b54708;
+      --panel: #fffcf7;
+      --safe-t: env(safe-area-inset-top, 0px);
+      --safe-b: env(safe-area-inset-bottom, 0px);
+      --safe-l: env(safe-area-inset-left, 0px);
+      --safe-r: env(safe-area-inset-right, 0px);
+      --radius: 20px;
+      --tap: 48px;
+      --bar-h: 120px;
+    }
+
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    html, body {
+      margin: 0;
+      min-height: 100%;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: "Outfit", system-ui, sans-serif;
+      font-weight: 450;
+    }
+    body {
+      padding:
+        calc(12px + var(--safe-t))
+        calc(16px + var(--safe-r))
+        calc(var(--bar-h) + 16px + var(--safe-b))
+        calc(16px + var(--safe-l));
+    }
+    button, input, select { font: inherit; color: inherit; }
+    button { cursor: pointer; border: 0; background: none; }
+    .mono { font-family: "IBM Plex Mono", ui-monospace, monospace; }
+
+    .topbar {
+      display: flex; align-items: center; gap: 10px;
+      margin-bottom: 14px; min-height: var(--tap);
+    }
+    .topbar h1 {
+      margin: 0; flex: 1;
+      font-family: "Fraunces", Georgia, serif;
+      font-size: 1.55rem; font-weight: 600; letter-spacing: -0.03em;
+    }
+    .brand-mark {
+      width: 42px; height: 42px; border-radius: 14px;
+      background: var(--paper); border: 1px solid var(--line);
+      display: grid; place-items: center; flex-shrink: 0;
+    }
+    .brand-mark svg { width: 26px; height: 26px; }
+
+    .btn {
+      min-height: var(--tap); padding: 0 16px; border-radius: 999px;
+      background: var(--paper); border: 1px solid var(--line); font-weight: 600;
+    }
+    .btn:active { transform: scale(0.98); }
+    .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+    .btn.primary {
+      background: var(--accent); color: #fff; border-color: var(--accent);
+    }
+    .btn.danger {
+      background: var(--bad); color: #fff; border-color: var(--bad);
+    }
+    .btn.ghost { background: transparent; }
+
+    .card {
+      background: var(--paper); border: 1px solid var(--line);
+      border-radius: var(--radius); padding: 16px; margin-bottom: 14px;
+    }
+    .card h2 {
+      margin: 0 0 8px;
+      font-family: "Fraunces", Georgia, serif;
+      font-size: 1.1rem; font-weight: 600;
+    }
+    .hint { color: var(--muted); font-size: 0.92rem; line-height: 1.45; margin: 0; }
+
+    .status-pill {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 8px 14px; border-radius: 999px;
+      background: var(--bg); border: 1px solid var(--line);
+      font-size: 0.88rem; font-weight: 600;
+    }
+    .status-pill .dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: var(--muted); flex-shrink: 0;
+    }
+    .status-pill.waiting .dot { background: var(--warn); animation: pulse 1.6s ease infinite; }
+    .status-pill.listening .dot { background: var(--ok); animation: pulse 1.4s ease infinite; }
+    .status-pill.cutout .dot { background: var(--warn); animation: pulse 0.8s ease infinite; }
+    .status-pill.playing .dot { background: var(--accent); animation: pulse 1s ease infinite; }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.5; transform: scale(0.85); }
+    }
+
+    .track-list {
+      list-style: none; margin: 12px 0 0; padding: 0;
+      max-height: 240px; overflow-y: auto;
+      border: 1px solid var(--line); border-radius: 14px;
+    }
+    .track-list li {
+      display: flex; align-items: center; gap: 10px;
+      padding: 12px 14px; border-bottom: 1px solid var(--line);
+      cursor: pointer; transition: background 0.15s;
+    }
+    .track-list li:last-child { border-bottom: 0; }
+    .track-list li:active { background: var(--bg); }
+    .track-list li.selected {
+      background: rgba(18, 60, 50, 0.08);
+      border-left: 3px solid var(--accent);
+      padding-left: 11px;
+    }
+    .track-list li .name {
+      flex: 1; font-size: 0.92rem; word-break: break-word;
+    }
+    .track-list li .dur {
+      font-size: 0.78rem; color: var(--muted);
+    }
+
+    .progress-wrap { margin-top: 14px; }
+    .progress-bar {
+      height: 8px; background: var(--bg); border-radius: 999px;
+      border: 1px solid var(--line); overflow: hidden;
+    }
+    .progress-fill {
+      height: 100%; width: 0%; background: var(--accent);
+      border-radius: 999px; transition: width 0.25s linear;
+    }
+    .progress-meta {
+      display: flex; justify-content: space-between;
+      margin-top: 6px; font-size: 0.82rem; color: var(--muted);
+    }
+
+    .settings {
+      margin-top: 8px;
+    }
+    .settings summary {
+      cursor: pointer; font-weight: 600; font-size: 0.9rem;
+      padding: 8px 0; color: var(--muted);
+    }
+    .setting-row {
+      display: flex; align-items: center; gap: 12px;
+      margin: 10px 0;
+    }
+    .setting-row label { flex: 1; font-size: 0.88rem; }
+    .setting-row input[type="range"] { flex: 1.2; accent-color: var(--accent); }
+    .setting-row .val {
+      min-width: 52px; text-align: right;
+      font-size: 0.82rem; color: var(--muted);
+    }
+
+    .bottom-bar {
+      position: fixed; left: 0; right: 0; bottom: 0; z-index: 10;
+      padding:
+        12px calc(16px + var(--safe-r))
+        calc(12px + var(--safe-b))
+        calc(16px + var(--safe-l));
+      background: rgba(243, 240, 232, 0.92);
+      backdrop-filter: blur(12px);
+      border-top: 1px solid var(--line);
+    }
+    .bottom-bar .btn {
+      width: 100%; min-height: 56px; font-size: 1.05rem;
+      border-radius: 16px;
+    }
+
+    .overlay {
+      display: none; position: fixed; inset: 0; z-index: 100;
+      background: rgba(22, 20, 17, 0.55);
+      align-items: center; justify-content: center;
+      padding: 24px;
+    }
+    .overlay.show { display: flex; }
+    .overlay-card {
+      background: var(--paper); border-radius: var(--radius);
+      padding: 28px 24px; max-width: 360px; width: 100%;
+      text-align: center; border: 1px solid var(--line);
+      animation: fadeUp 0.25s ease;
+    }
+    @keyframes fadeUp {
+      from { opacity: 0; transform: translateY(12px); }
+      to { opacity: 1; transform: none; }
+    }
+    .overlay-card h2 {
+      margin: 0 0 8px;
+      font-family: "Fraunces", Georgia, serif;
+      font-size: 1.35rem;
+    }
+    .overlay-card p {
+      margin: 0 0 20px; color: var(--muted); line-height: 1.45;
+    }
+    .overlay-card .btn { width: 100%; min-height: 56px; border-radius: 16px; font-size: 1.05rem; }
+
+    .empty-state {
+      text-align: center; padding: 24px 12px; color: var(--muted);
+    }
+
+    .mic-meter {
+      height: 6px; background: var(--bg); border-radius: 999px;
+      border: 1px solid var(--line); overflow: hidden; margin-top: 10px;
+    }
+    .mic-meter-fill {
+      height: 100%; width: 0%; background: var(--ok);
+      border-radius: 999px; transition: width 0.08s linear;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation-duration: 0.01ms !important;
+        transition-duration: 0.01ms !important;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand-mark" aria-hidden="true">
+      <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <rect x="3" y="10" width="3" height="8" rx="1" fill="#123c32"/>
+        <rect x="8" y="7" width="3" height="11" rx="1" fill="#123c32"/>
+        <rect x="13" y="9" width="3" height="9" rx="1" fill="#123c32"/>
+        <rect x="18" y="5" width="3" height="13" rx="1" fill="#123c32"/>
+      </svg>
+    </div>
+    <h1>Back Me Up</h1>
+    <button type="button" class="btn ghost" id="btnReload" title="Reload app">↻</button>
+  </header>
+
+  <section class="card" id="setupCard">
+    <h2>Audio folder</h2>
+    <p class="hint">Load the folder of instruction audio. Pick the track, then arm backup — the mic listens for the start and auto-syncs when it hears a match.</p>
+    <button type="button" class="btn primary" id="btnLoadFolder" style="margin-top:12px;width:100%">Load audio folder</button>
+    <input type="file" id="folderInput" webkitdirectory multiple accept="audio/*" hidden />
+    <ul class="track-list" id="trackList" hidden></ul>
+    <p class="empty-state" id="emptyTracks">No folder loaded yet.</p>
+  </section>
+
+  <section class="card" id="statusCard" hidden>
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
+      <h2 style="margin:0">Status</h2>
+      <span class="status-pill" id="statusPill"><span class="dot"></span><span id="statusText">Ready</span></span>
+    </div>
+    <p class="hint" id="selectedTrackLabel" style="margin-top:10px"></p>
+    <div class="progress-wrap">
+      <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+      <div class="progress-meta">
+        <span class="mono" id="timeCurrent">0:00</span>
+        <span class="mono" id="timeTotal">0:00</span>
+      </div>
+    </div>
+    <div class="mic-meter" id="micMeterWrap" hidden>
+      <div class="mic-meter-fill" id="micMeterFill"></div>
+    </div>
+  </section>
+
+  <details class="settings card">
+    <summary>Settings</summary>
+    <div class="setting-row">
+      <label for="bufferDelay">Buffer delay</label>
+      <input type="range" id="bufferDelay" min="500" max="3000" step="100" value="1500" />
+      <span class="val mono" id="bufferDelayVal">1.5 s</span>
+    </div>
+    <div class="setting-row">
+      <label for="silenceThreshold">Silence threshold</label>
+      <input type="range" id="silenceThreshold" min="0.005" max="0.08" step="0.005" value="0.02" />
+      <span class="val mono" id="silenceThresholdVal">0.02</span>
+    </div>
+    <div class="setting-row">
+      <label for="silenceDuration">Cutout after silence</label>
+      <input type="range" id="silenceDuration" min="400" max="2000" step="100" value="800" />
+      <span class="val mono" id="silenceDurationVal">800 ms</span>
+    </div>
+    <div class="setting-row">
+      <label for="fingerprintSec">Start fingerprint length</label>
+      <input type="range" id="fingerprintSec" min="10" max="20" step="1" value="15" />
+      <span class="val mono" id="fingerprintSecVal">15 s</span>
+    </div>
+    <div class="setting-row">
+      <label for="matchThreshold">Start match confidence</label>
+      <input type="range" id="matchThreshold" min="0.25" max="0.7" step="0.05" value="0.4" />
+      <span class="val mono" id="matchThresholdVal">0.40</span>
+    </div>
+  </details>
+
+  <div class="bottom-bar">
+    <button type="button" class="btn primary" id="btnMain" disabled>Back me up</button>
+  </div>
+
+  <div class="overlay" id="cutoutOverlay" role="dialog" aria-labelledby="cutoutTitle">
+    <div class="overlay-card">
+      <h2 id="cutoutTitle">Main audio stopped</h2>
+      <p>Take over from the synced position?</p>
+      <button type="button" class="btn primary" id="btnTakeOver">Take Over</button>
+      <button type="button" class="btn" id="btnDismissCutout" style="margin-top:10px">Keep listening</button>
+    </div>
+  </div>
+
+  <script>
+    const $ = id => document.getElementById(id);
+
+    const ENVELOPE_RATE = 20;
+    const MIC_WINDOW_SEC = 3;
+    const PRIMED_MIC_SEC = 2.5;
+    const TRACK_INTERVAL_MS = 250;
+    const SPEECH_RECENT_MS = 30000;
+    const FILE_END_THRESHOLD = 0.95;
+    const EMA_ALPHA = 0.35;
+    const MATCH_CONFIRM_TICKS = 3;
+
+    const state = {
+      tracks: [],
+      selectedId: null,
+      mode: 'idle',
+      settings: {
+        bufferDelayMs: 1500,
+        silenceThreshold: 0.02,
+        silenceDurationMs: 800,
+        fingerprintSec: 15,
+        matchThreshold: 0.4
+      }
+    };
+
+    let audioCtx = null;
+    let micStream = null;
+    let micSource = null;
+    let analyser = null;
+    let timeDomainBuf = null;
+    let fileBuffer = null;
+    let fileEnvelope = null;
+    let startFingerprint = null;
+    let fileDuration = 0;
+    let backupAudio = null;
+    let wakeLock = null;
+
+    let trackedPosition = 0;
+    let smoothedPosition = 0;
+    let lastSpeechAt = 0;
+    let silenceSince = null;
+    let micEnvelopeRing = [];
+    let trackTimer = null;
+    let meterTimer = null;
+    let matchStreak = 0;
+    let lastMatchScore = 0;
+
+    function fmtTime(sec) {
+      if (!isFinite(sec) || sec < 0) sec = 0;
+      const m = Math.floor(sec / 60);
+      const s = Math.floor(sec % 60);
+      return m + ':' + String(s).padStart(2, '0');
+    }
+
+    function selectedTrack() {
+      return state.tracks.find(t => t.id === state.selectedId) || null;
+    }
+
+    function revokeTracks() {
+      state.tracks.forEach(t => {
+        if (t.url) URL.revokeObjectURL(t.url);
+      });
+    }
+
+    function setMode(mode) {
+      state.mode = mode;
+      updateUI();
+    }
+
+    function updateUI() {
+      const track = selectedTrack();
+      const hasTracks = state.tracks.length > 0;
+      const hasSelection = !!track;
+
+      $('emptyTracks').hidden = hasTracks;
+      $('trackList').hidden = !hasTracks;
+      $('statusCard').hidden = !hasSelection;
+
+      if (track) {
+        $('selectedTrackLabel').textContent = 'Track: ' + track.name;
+        $('timeTotal').textContent = fmtTime(track.duration || fileDuration);
+      }
+
+      const pill = $('statusPill');
+      pill.className = 'status-pill';
+      const btn = $('btnMain');
+
+      if (state.mode === 'idle') {
+        $('statusText').textContent = hasSelection ? 'Ready' : 'Select a track';
+        btn.textContent = 'Back me up';
+        btn.className = 'btn primary';
+        btn.disabled = !hasSelection;
+        $('micMeterWrap').hidden = true;
+      } else if (state.mode === 'primed') {
+        pill.classList.add('waiting');
+        const matchHint = lastMatchScore > 0 ? ' · match ' + Math.round(lastMatchScore * 100) + '%' : '';
+        $('statusText').textContent = 'Waiting for audio' + matchHint;
+        btn.textContent = 'Cancel';
+        btn.className = 'btn';
+        btn.disabled = false;
+        $('micMeterWrap').hidden = false;
+      } else if (state.mode === 'armed') {
+        pill.classList.add('listening');
+        $('statusText').textContent = 'Listening · ' + (state.settings.bufferDelayMs / 1000).toFixed(1) + ' s behind';
+        btn.textContent = 'Disarm';
+        btn.className = 'btn';
+        btn.disabled = false;
+        $('micMeterWrap').hidden = false;
+      } else if (state.mode === 'cutout') {
+        pill.classList.add('cutout');
+        $('statusText').textContent = 'Cutout detected';
+        btn.textContent = 'Disarm';
+        btn.className = 'btn';
+        btn.disabled = false;
+        $('micMeterWrap').hidden = false;
+      } else if (state.mode === 'backing') {
+        pill.classList.add('playing');
+        $('statusText').textContent = 'Playing backup';
+        btn.textContent = 'Stop';
+        btn.className = 'btn danger';
+        btn.disabled = false;
+        $('micMeterWrap').hidden = true;
+      }
+
+      $('btnLoadFolder').disabled = state.mode !== 'idle' && state.mode !== 'backing';
+      const locked = state.mode === 'primed' || state.mode === 'armed' || state.mode === 'cutout';
+      document.querySelectorAll('.track-list li').forEach(li => {
+        li.style.pointerEvents = locked ? 'none' : '';
+        li.style.opacity = locked ? '0.65' : '';
+      });
+      $('cutoutOverlay').classList.toggle('show', state.mode === 'cutout');
+    }
+
+    function renderTrackList() {
+      const list = $('trackList');
+      list.innerHTML = '';
+      state.tracks.forEach(t => {
+        const li = document.createElement('li');
+        li.className = t.id === state.selectedId ? 'selected' : '';
+        li.innerHTML = '<span class="name">' + escapeHtml(t.name) + '</span><span class="dur mono">' + (t.duration ? fmtTime(t.duration) : '…') + '</span>';
+        li.addEventListener('click', () => selectTrack(t.id));
+        list.appendChild(li);
+      });
+      updateUI();
+    }
+
+    function escapeHtml(s) {
+      return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+
+    function selectTrack(id) {
+      if (state.mode === 'primed' || state.mode === 'armed' || state.mode === 'cutout') return;
+      state.selectedId = id;
+      renderTrackList();
+    }
+
+    async function probeDuration(track) {
+      return new Promise(resolve => {
+        const a = new Audio();
+        a.preload = 'metadata';
+        a.src = track.url;
+        a.addEventListener('loadedmetadata', () => {
+          track.duration = a.duration || 0;
+          resolve();
+        }, { once: true });
+        a.addEventListener('error', () => resolve(), { once: true });
+      });
+    }
+
+    async function handleFolderPick(ev) {
+      const files = Array.from(ev.target.files || []);
+      const audioFiles = files.filter(f => /^audio\//.test(f.type) || /\.(mp3|wav|m4a|aac|ogg|flac|webm)$/i.test(f.name));
+      if (!audioFiles.length) {
+        alert('No audio files found in that folder.');
+        ev.target.value = '';
+        return;
+      }
+
+      if (state.mode !== 'idle' && state.mode !== 'backing') await disarm(false);
+      revokeTracks();
+
+      state.tracks = audioFiles
+        .sort((a, b) => a.name.localeCompare(b.name))
+        .map((file, i) => ({
+          id: 't' + i,
+          name: file.name.replace(/^.*[\\/]/, ''),
+          file,
+          url: URL.createObjectURL(file),
+          duration: 0
+        }));
+
+      state.selectedId = state.tracks[0]?.id || null;
+      renderTrackList();
+      await Promise.all(state.tracks.map(probeDuration));
+      renderTrackList();
+      ev.target.value = '';
+    }
+
+    function ensureAudioCtx() {
+      if (!audioCtx) {
+        const Ctx = window.AudioContext || window.webkitAudioContext;
+        if (!Ctx) throw new Error('Web Audio not supported');
+        audioCtx = new Ctx();
+      }
+      if (audioCtx.state === 'suspended') audioCtx.resume();
+      return audioCtx;
+    }
+
+    function computeEnvelope(buffer, rate) {
+      const ch = buffer.getChannelData(0);
+      const sr = buffer.sampleRate;
+      const win = Math.max(1, Math.floor(sr / rate));
+      const len = Math.ceil(ch.length / win);
+      const env = new Float32Array(len);
+      for (let i = 0; i < len; i++) {
+        let sum = 0;
+        const start = i * win;
+        const end = Math.min(start + win, ch.length);
+        for (let j = start; j < end; j++) sum += ch[j] * ch[j];
+        env[i] = Math.sqrt(sum / (end - start));
+      }
+      return env;
+    }
+
+    function rmsFromAnalyser() {
+      if (!analyser || !timeDomainBuf) return 0;
+      analyser.getFloatTimeDomainData(timeDomainBuf);
+      let sum = 0;
+      for (let i = 0; i < timeDomainBuf.length; i++) sum += timeDomainBuf[i] * timeDomainBuf[i];
+      return Math.sqrt(sum / timeDomainBuf.length);
+    }
+
+    function normalizeEnvelope(arr) {
+      let max = 0.0001;
+      for (let i = 0; i < arr.length; i++) if (arr[i] > max) max = arr[i];
+      const out = new Float32Array(arr.length);
+      for (let i = 0; i < arr.length; i++) out[i] = arr[i] / max;
+      return out;
+    }
+
+    function correlateAtPosition(micEnv, fileEnv, centerSec) {
+      if (!micEnv.length || !fileEnv.length) return { position: centerSec, score: 0 };
+
+      const micNorm = normalizeEnvelope(micEnv);
+      const micLen = micNorm.length;
+      const maxStart = fileEnv.length - micLen;
+      if (maxStart <= 0) return { position: 0, score: 0 };
+
+      let bestIdx = 0;
+      let bestScore = -Infinity;
+      const searchStart = Math.max(0, Math.floor(centerSec * ENVELOPE_RATE) - ENVELOPE_RATE * 8);
+      const searchEnd = Math.min(maxStart, Math.floor(centerSec * ENVELOPE_RATE) + ENVELOPE_RATE * 12);
+
+      for (let i = searchStart; i <= searchEnd; i++) {
+        let dot = 0;
+        let micMag = 0;
+        let fileMag = 0;
+        for (let j = 0; j < micLen; j++) {
+          const m = micNorm[j];
+          const f = fileEnv[i + j];
+          dot += m * f;
+          micMag += m * m;
+          fileMag += f * f;
+        }
+        const denom = Math.sqrt(micMag * fileMag) || 1;
+        const score = dot / denom;
+        if (score > bestScore) {
+          bestScore = score;
+          bestIdx = i;
+        }
+      }
+
+      return { position: bestIdx / ENVELOPE_RATE, score: bestScore };
+    }
+
+    function matchStartFingerprint(micEnv, startFp) {
+      if (!micEnv.length || !startFp.length) return { position: 0, score: 0 };
+
+      const micNorm = normalizeEnvelope(micEnv);
+      const micLen = micNorm.length;
+      const maxStart = startFp.length - micLen;
+      if (maxStart < 0) return { position: 0, score: 0 };
+
+      let bestIdx = 0;
+      let bestScore = -Infinity;
+
+      for (let i = 0; i <= maxStart; i++) {
+        let dot = 0;
+        let micMag = 0;
+        let fileMag = 0;
+        for (let j = 0; j < micLen; j++) {
+          const m = micNorm[j];
+          const f = startFp[i + j];
+          dot += m * f;
+          micMag += m * m;
+          fileMag += f * f;
+        }
+        const denom = Math.sqrt(micMag * fileMag) || 1;
+        const score = dot / denom;
+        if (score > bestScore) {
+          bestScore = score;
+          bestIdx = i;
+        }
+      }
+
+      return { position: bestIdx / ENVELOPE_RATE, score: bestScore };
+    }
+
+    function pushMicSample(rms) {
+      micEnvelopeRing.push(rms);
+      const maxLen = Math.ceil(MIC_WINDOW_SEC * ENVELOPE_RATE);
+      if (micEnvelopeRing.length > maxLen) micEnvelopeRing.shift();
+    }
+
+    function updateProgressDisplay() {
+      const dur = fileDuration || selectedTrack()?.duration || 0;
+      const pos = state.mode === 'backing' && backupAudio ? backupAudio.currentTime : trackedPosition;
+      $('timeCurrent').textContent = fmtTime(pos);
+      $('progressFill').style.width = dur ? Math.min(100, (pos / dur) * 100) + '%' : '0%';
+    }
+
+    function syncBackupPlayer() {
+      if (!backupAudio || state.mode === 'cutout') return;
+      const target = Math.max(0, trackedPosition - state.settings.bufferDelayMs / 1000);
+      if (Math.abs(backupAudio.currentTime - target) > 0.4) {
+        backupAudio.currentTime = target;
+      }
+      if (backupAudio.paused && state.mode === 'armed') {
+        backupAudio.play().catch(() => {});
+      }
+    }
+
+    function tickPrimed() {
+      const rms = rmsFromAnalyser();
+      pushMicSample(rms);
+
+      if (rms > state.settings.silenceThreshold) lastSpeechAt = Date.now();
+
+      const minSamples = Math.ceil(PRIMED_MIC_SEC * ENVELOPE_RATE);
+      if (micEnvelopeRing.length >= minSamples && startFingerprint) {
+        const match = matchStartFingerprint(micEnvelopeRing, startFingerprint);
+        lastMatchScore = match.score;
+        updateUI();
+
+        if (match.score >= state.settings.matchThreshold && rms > state.settings.silenceThreshold) {
+          matchStreak++;
+          if (matchStreak >= MATCH_CONFIRM_TICKS) {
+            activateSync(match.position);
+            return;
+          }
+        } else {
+          matchStreak = 0;
+        }
+      }
+
+      updateProgressDisplay();
+    }
+
+    async function activateSync(startSec) {
+      trackedPosition = startSec;
+      smoothedPosition = startSec;
+      lastSpeechAt = Date.now();
+      silenceSince = null;
+      matchStreak = 0;
+
+      if (backupAudio) {
+        const target = Math.max(0, startSec - state.settings.bufferDelayMs / 1000);
+        backupAudio.currentTime = target;
+        backupAudio.volume = 0;
+        await backupAudio.play().catch(() => {});
+      }
+
+      if (trackTimer) clearInterval(trackTimer);
+      trackTimer = setInterval(tickTrack, TRACK_INTERVAL_MS);
+
+      setMode('armed');
+    }
+
+    function tickTrack() {
+      const rms = rmsFromAnalyser();
+      pushMicSample(rms);
+
+      if (rms > state.settings.silenceThreshold) {
+        lastSpeechAt = Date.now();
+        silenceSince = null;
+      } else if (state.mode === 'armed') {
+        if (!silenceSince) silenceSince = Date.now();
+      }
+
+      if (micEnvelopeRing.length >= ENVELOPE_RATE) {
+        const result = correlateAtPosition(micEnvelopeRing, fileEnvelope, smoothedPosition);
+        if (result.score >= 0.25) {
+          smoothedPosition = smoothedPosition * (1 - EMA_ALPHA) + result.position * EMA_ALPHA;
+          trackedPosition = smoothedPosition;
+        }
+      }
+
+      if (state.mode === 'armed') {
+        syncBackupPlayer();
+        checkCutout(rms);
+      }
+
+      updateProgressDisplay();
+    }
+
+    function checkCutout(rms) {
+      if (!silenceSince) return;
+      const silentFor = Date.now() - silenceSince;
+      if (silentFor < state.settings.silenceDurationMs) return;
+      if (Date.now() - lastSpeechAt > SPEECH_RECENT_MS) return;
+      if (fileDuration && trackedPosition / fileDuration > FILE_END_THRESHOLD) return;
+
+      if (backupAudio) backupAudio.pause();
+      setMode('cutout');
+    }
+
+    function tickMeter() {
+      const rms = rmsFromAnalyser();
+      const pct = Math.min(100, (rms / 0.15) * 100);
+      $('micMeterFill').style.width = pct + '%';
+    }
+
+    async function requestWakeLock() {
+      if (!('wakeLock' in navigator)) return;
+      try {
+        wakeLock = await navigator.wakeLock.request('screen');
+        wakeLock.addEventListener('release', () => { wakeLock = null; });
+      } catch { /* ignore */ }
+    }
+
+    function releaseWakeLock() {
+      if (wakeLock) {
+        wakeLock.release().catch(() => {});
+        wakeLock = null;
+      }
+    }
+
+    async function prime() {
+      const track = selectedTrack();
+      if (!track) return;
+
+      try {
+        ensureAudioCtx();
+        micStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false }, video: false });
+        micSource = audioCtx.createMediaStreamSource(micStream);
+        analyser = audioCtx.createAnalyser();
+        analyser.fftSize = 2048;
+        micSource.connect(analyser);
+        timeDomainBuf = new Float32Array(analyser.fftSize);
+
+        const arrayBuf = await track.file.arrayBuffer();
+        fileBuffer = await audioCtx.decodeAudioData(arrayBuf.slice(0));
+        fileDuration = fileBuffer.duration;
+        const rawEnvelope = computeEnvelope(fileBuffer, ENVELOPE_RATE);
+        fileEnvelope = normalizeEnvelope(rawEnvelope);
+        const fpLen = Math.min(
+          Math.ceil(state.settings.fingerprintSec * ENVELOPE_RATE),
+          rawEnvelope.length
+        );
+        startFingerprint = normalizeEnvelope(rawEnvelope.subarray(0, fpLen));
+        track.duration = fileDuration;
+
+        backupAudio = new Audio(track.url);
+        backupAudio.preload = 'auto';
+        backupAudio.volume = 0;
+        backupAudio.playbackRate = 1;
+
+        trackedPosition = 0;
+        smoothedPosition = 0;
+        lastSpeechAt = Date.now();
+        silenceSince = null;
+        micEnvelopeRing = [];
+        matchStreak = 0;
+        lastMatchScore = 0;
+
+        await requestWakeLock();
+
+        trackTimer = setInterval(tickPrimed, TRACK_INTERVAL_MS);
+        meterTimer = setInterval(tickMeter, 80);
+
+        setMode('primed');
+        renderTrackList();
+      } catch (err) {
+        console.error(err);
+        await disarm(false);
+        alert(err.name === 'NotAllowedError'
+          ? 'Microphone permission is required to listen and sync.'
+          : 'Could not arm backup: ' + (err.message || err));
+      }
+    }
+
+    async function disarm(resetProgress) {
+      if (trackTimer) { clearInterval(trackTimer); trackTimer = null; }
+      if (meterTimer) { clearInterval(meterTimer); meterTimer = null; }
+
+      if (backupAudio) {
+        backupAudio.pause();
+        backupAudio.src = '';
+        backupAudio = null;
+      }
+
+      if (micSource) { micSource.disconnect(); micSource = null; }
+      if (micStream) {
+        micStream.getTracks().forEach(t => t.stop());
+        micStream = null;
+      }
+      analyser = null;
+      timeDomainBuf = null;
+      fileBuffer = null;
+      fileEnvelope = null;
+      startFingerprint = null;
+
+      releaseWakeLock();
+
+      if (resetProgress !== false) {
+        trackedPosition = 0;
+        smoothedPosition = 0;
+      }
+
+      micEnvelopeRing = [];
+      silenceSince = null;
+      matchStreak = 0;
+      lastMatchScore = 0;
+      setMode('idle');
+      updateProgressDisplay();
+    }
+
+    async function takeOver() {
+      if (!backupAudio) return;
+      backupAudio.volume = 1;
+      backupAudio.currentTime = Math.max(0, trackedPosition);
+      await backupAudio.play();
+      setMode('backing');
+
+      if (trackTimer) { clearInterval(trackTimer); trackTimer = null; }
+      if (meterTimer) { clearInterval(meterTimer); meterTimer = null; }
+
+      backupAudio.onended = () => {
+        disarm(true);
+      };
+
+      const progressInterval = setInterval(() => {
+        if (state.mode !== 'backing') { clearInterval(progressInterval); return; }
+        $('timeCurrent').textContent = fmtTime(backupAudio.currentTime);
+        const dur = fileDuration || backupAudio.duration || 1;
+        $('progressFill').style.width = Math.min(100, (backupAudio.currentTime / dur) * 100) + '%';
+      }, 200);
+    }
+
+    function dismissCutout() {
+      silenceSince = null;
+      lastSpeechAt = Date.now();
+      if (backupAudio) {
+        backupAudio.volume = 0;
+        backupAudio.play().catch(() => {});
+      }
+      setMode('armed');
+      if (!trackTimer) trackTimer = setInterval(tickTrack, TRACK_INTERVAL_MS);
+      if (!meterTimer) meterTimer = setInterval(tickMeter, 80);
+    }
+
+    $('btnLoadFolder').addEventListener('click', () => $('folderInput').click());
+    $('folderInput').addEventListener('change', handleFolderPick);
+
+    $('btnMain').addEventListener('click', async () => {
+      if (state.mode === 'idle') await prime();
+      else if (state.mode === 'primed' || state.mode === 'armed' || state.mode === 'cutout') await disarm(true);
+      else if (state.mode === 'backing') await disarm(true);
+    });
+
+    $('btnTakeOver').addEventListener('click', takeOver);
+    $('btnDismissCutout').addEventListener('click', dismissCutout);
+
+    $('btnReload').addEventListener('click', () => {
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.getRegistrations().then(regs => regs.forEach(r => r.unregister()));
+      }
+      location.reload();
+    });
+
+    $('bufferDelay').addEventListener('input', e => {
+      state.settings.bufferDelayMs = +e.target.value;
+      $('bufferDelayVal').textContent = (state.settings.bufferDelayMs / 1000).toFixed(1) + ' s';
+    });
+    $('silenceThreshold').addEventListener('input', e => {
+      state.settings.silenceThreshold = +e.target.value;
+      $('silenceThresholdVal').textContent = state.settings.silenceThreshold.toFixed(3);
+    });
+    $('silenceDuration').addEventListener('input', e => {
+      state.settings.silenceDurationMs = +e.target.value;
+      $('silenceDurationVal').textContent = state.settings.silenceDurationMs + ' ms';
+    });
+    $('fingerprintSec').addEventListener('input', e => {
+      state.settings.fingerprintSec = +e.target.value;
+      $('fingerprintSecVal').textContent = state.settings.fingerprintSec + ' s';
+    });
+    $('matchThreshold').addEventListener('input', e => {
+      state.settings.matchThreshold = +e.target.value;
+      $('matchThresholdVal').textContent = state.settings.matchThreshold.toFixed(2);
+    });
+
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('./service-worker.js').catch(() => {});
+    }
+
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible' && (state.mode === 'primed' || state.mode === 'armed' || state.mode === 'cutout')) {
+        requestWakeLock();
+        if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+      }
+    });
+
+    updateUI();
+  </script>
+</body>
+</html>
