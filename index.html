@@ -140,6 +140,9 @@
     .track-list li .dur {
       font-size: 0.78rem; color: var(--muted);
     }
+    .track-list li .fp-tag {
+      flex-shrink: 0; font-size: 0.68rem; font-weight: 600; color: var(--ok);
+    }
 
     .progress-wrap { margin-top: 14px; }
     .progress-bar {
@@ -264,10 +267,11 @@
       margin: 6px 0 4px; text-transform: uppercase; letter-spacing: 0.04em;
     }
     .fp-lane {
-      position: relative; height: 32px;
+      position: relative; height: 68px;
       background: var(--bg); border: 1px solid var(--line);
       border-radius: 8px; overflow: hidden;
     }
+    .fp-lane canvas { display: block; width: 100%; height: 100%; }
     .fp-burst {
       position: absolute; bottom: 4px;
       border-radius: 3px 3px 1px 1px; min-width: 3px;
@@ -309,7 +313,7 @@
 
   <section class="card" id="setupCard">
     <h2>Audio folder</h2>
-    <p class="hint">Load the folder of instruction audio. Pick the track, then arm backup. The first ~30 s of the file becomes a peak-hash fingerprint (mini-Shazam). The mic records short clips and only matching clips count toward lock — talking and other room noise is ignored. Cutout only fires if the mic goes quiet where the file still has speech.</p>
+    <p class="hint" id="folderHint">Load the folder of instruction audio. Pick the track, then arm backup. The first ~30 s of the file becomes a peak-hash fingerprint (mini-Shazam). The mic records short clips and only matching clips count toward lock — talking and other room noise is ignored. Cutout only fires if the mic goes quiet where the file still has speech. The folder and fingerprints stay on this phone.</p>
     <button type="button" class="btn primary" id="btnLoadFolder" style="margin-top:12px;width:100%">Load audio folder</button>
     <input type="file" id="folderInput" webkitdirectory multiple accept="audio/*" hidden />
     <ul class="track-list" id="trackList" hidden></ul>
@@ -336,10 +340,10 @@
     <p class="sync-line" id="syncLine" hidden></p>
     <div class="fp-viz" id="fpViz" hidden>
       <p class="fp-meta mono" id="fpMeta"></p>
-      <div class="fp-label">File fingerprint</div>
-      <div class="fp-lane" id="fpFileLane" aria-hidden="true"></div>
-      <div class="fp-label">Heard</div>
-      <div class="fp-lane" id="fpMicLane" aria-hidden="true"></div>
+      <div class="fp-label" id="fpFileLabel">File fingerprint</div>
+      <div class="fp-lane" id="fpFileLane" aria-hidden="true"><canvas id="fpFileCanvas"></canvas></div>
+      <div class="fp-label" id="fpMicLabel">Heard</div>
+      <div class="fp-lane" id="fpMicLane" aria-hidden="true"><canvas id="fpMicCanvas"></canvas></div>
     </div>
     <div class="test-row" id="testRow" hidden>
       <button type="button" class="btn" id="btnSimulate">Simulate main amp</button>
@@ -393,9 +397,12 @@
       <input type="range" id="confirmHold" min="3000" max="10000" step="500" value="5000" />
       <span class="val mono" id="confirmHoldVal">5 s</span>
     </div>
+    <button type="button" class="btn" id="btnForgetLibrary" style="width:100%;margin-top:8px">Forget saved folder</button>
+    <p class="hint cal-hint">Fingerprints stay until you clear them. Forgetting the folder does not delete stored fingerprints.</p>
+    <button type="button" class="btn" id="btnForgetFingerprints" style="width:100%;margin-top:8px">Clear stored fingerprints</button>
   </details>
 
-  <p class="ver mono" id="appVer">v1.4.0</p>
+  <p class="ver mono" id="appVer">v1.4.2</p>
 
   <div class="bottom-bar">
     <button type="button" class="btn primary" id="btnMain" disabled>Back me up</button>
@@ -412,7 +419,7 @@
 
   <script>
     const $ = id => document.getElementById(id);
-    const APP_VER = '1.4.0';
+    const APP_VER = '1.4.2';
 
     const ENVELOPE_RATE = 20;
     const LISTEN_MS = 50;
@@ -440,6 +447,12 @@
     const FP_DT_MAX = 35;
     const FP_BIN_Q = 3;
     const FP_HOP_SEC = FP_HOP / FP_SR;
+    const SPOT_MAX = 2;
+    const SPOT_WAIT_MS = 60000;
+    const SPOT_PREROLL = 0.35;
+    const FP_CACHE_VER = 1;
+    const IDB_NAME = 'back-me-up';
+    const IDB_VER = 1;
 
     const state = {
       tracks: [],
@@ -509,6 +522,23 @@
     let lastClipOffset = 0;
     let lastClipStatus = 'waiting';
     let lastClipContrast = 0;
+    let lastClipPerfStart = 0;
+    let alignPerfAt = 0;
+    let alignFileAt = 0;
+    let hasAlign = false;
+    let micEnvT = [];
+    let micEnvV = [];
+    let spotMode = false;
+    let spotFileStart = 0;
+    let spotChecksDone = 0;
+    let nextSpotAt = 0;
+    let lastSpotStatus = '';
+    let dirHandle = null;
+    let folderName = '';
+    let pendingDirHandle = null;
+    let fpIndexBusy = false;
+    let fpGen = 0;
+    const fpInflight = new Map();
 
     function fmtTime(sec) {
       if (!isFinite(sec) || sec < 0) sec = 0;
@@ -523,6 +553,354 @@
         return (ms % 1000 === 0 ? sec.toFixed(0) : sec.toFixed(1)) + ' s';
       }
       return ms + ' ms';
+    }
+
+    function isAudioFile(file) {
+      return /^audio\//.test(file.type || '') || /\.(mp3|wav|m4a|aac|ogg|flac|webm)$/i.test(file.name);
+    }
+
+    function trackIdFor(file) {
+      return [file.name, file.size, file.lastModified || 0].join('|');
+    }
+
+    function fpStoreKey(file) {
+      return trackIdFor(file) + '|' + state.settings.fingerprintSec + '|' + FP_CACHE_VER;
+    }
+
+    function idbOpen() {
+      return new Promise((resolve, reject) => {
+        const req = indexedDB.open(IDB_NAME, IDB_VER);
+        req.onupgradeneeded = () => {
+          const db = req.result;
+          if (!db.objectStoreNames.contains('kv')) db.createObjectStore('kv');
+          if (!db.objectStoreNames.contains('fingerprints')) db.createObjectStore('fingerprints');
+        };
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+      });
+    }
+
+    function idbOp(store, mode, fn) {
+      return idbOpen().then(db => new Promise((resolve, reject) => {
+        const tx = db.transaction(store, mode);
+        const os = tx.objectStore(store);
+        const req = fn(os);
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+      }));
+    }
+
+    const kvGet = key => idbOp('kv', 'readonly', os => os.get(key));
+    const kvSet = (key, val) => idbOp('kv', 'readwrite', os => os.put(val, key));
+    const kvDel = key => idbOp('kv', 'readwrite', os => os.delete(key));
+    const fpGet = key => idbOp('fingerprints', 'readonly', os => os.get(key));
+    const fpPut = (key, val) => idbOp('fingerprints', 'readwrite', os => os.put(val, key));
+    function fpClear() {
+      return idbOpen().then(db => new Promise((resolve, reject) => {
+        const tx = db.transaction('fingerprints', 'readwrite');
+        tx.objectStore('fingerprints').clear();
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+      }));
+    }
+
+    function packTemplate(template) {
+      const packed = [];
+      template.index.forEach((times, hash) => {
+        packed.push(hash, times.length);
+        for (let i = 0; i < times.length; i++) packed.push(times[i]);
+      });
+      return {
+        ver: FP_CACHE_VER,
+        fingerprintSec: state.settings.fingerprintSec,
+        hashCount: template.hashCount,
+        peakCount: template.peakCount,
+        duration: template.duration,
+        originSec: template.originSec || 0,
+        packed: new Int32Array(packed)
+      };
+    }
+
+    function unpackTemplate(row) {
+      const index = new Map();
+      const packed = row.packed;
+      let i = 0;
+      while (i < packed.length) {
+        const hash = packed[i++];
+        const n = packed[i++];
+        const times = [];
+        for (let k = 0; k < n && i < packed.length; k++) times.push(packed[i++]);
+        index.set(hash, times);
+      }
+      templateHopSec = FP_HOP_SEC;
+      return {
+        index,
+        hashCount: row.hashCount,
+        peakCount: row.peakCount,
+        duration: row.duration,
+        originSec: row.originSec || 0
+      };
+    }
+
+    function hydrateFingerprint(row) {
+      fileDuration = row.fileDuration || row.duration || 0;
+      fileEnvelope = row.envelope;
+      fileSpeechThreshold = row.thresh;
+      fileBursts = extractBursts(fileEnvelope, fileSpeechThreshold);
+      const fpEnd = Math.min(fileEnvelope.length, Math.ceil(state.settings.fingerprintSec * ENVELOPE_RATE));
+      startBursts = extractBursts(fileEnvelope, fileSpeechThreshold, 0, fpEnd);
+      templateIndex = unpackTemplate(row);
+    }
+
+    async function fpLoad(file) {
+      try {
+        const row = await fpGet(fpStoreKey(file));
+        if (!row || row.ver !== FP_CACHE_VER) return null;
+        if (row.fingerprintSec !== state.settings.fingerprintSec) return null;
+        if (!row.envelope || !row.packed) return null;
+        return row;
+      } catch {
+        return null;
+      }
+    }
+
+    async function fpSave(file, analysed) {
+      const packed = packTemplate(analysed.template);
+      packed.envelope = analysed.envelope;
+      packed.thresh = analysed.thresh;
+      packed.fileDuration = analysed.duration;
+      packed.name = file.name;
+      await fpPut(fpStoreKey(file), packed);
+    }
+
+    async function markCachedFlags() {
+      await Promise.all(state.tracks.map(async t => {
+        t.fpCached = !!(await fpLoad(t.file));
+      }));
+    }
+
+    async function saveLibraryMeta() {
+      try {
+        await kvSet('libraryMeta', {
+          folderName,
+          selectedName: selectedTrack()?.name || '',
+          tracks: state.tracks.map(t => ({
+            name: t.name,
+            size: t.file ? t.file.size : 0,
+            lastModified: t.file ? t.file.lastModified : 0,
+            duration: t.duration || 0
+          }))
+        });
+        if (dirHandle) await kvSet('dirHandle', dirHandle);
+      } catch (err) {
+        console.warn('Could not save library', err);
+      }
+    }
+
+    function updateFolderUi() {
+      const btn = $('btnLoadFolder');
+      const hint = $('folderHint');
+      if (pendingDirHandle && !state.tracks.length) {
+        btn.textContent = 'Reopen ' + (pendingDirHandle.name || 'folder');
+        hint.textContent = 'Tap to reopen the saved folder. Fingerprints from last time are kept on this phone.';
+        return;
+      }
+      if (state.tracks.length) {
+        btn.textContent = 'Change folder';
+        const cached = state.tracks.filter(t => t.fpCached).length;
+        hint.textContent = (folderName ? folderName + ' · ' : '') +
+          state.tracks.length + ' tracks' +
+          (cached ? (' · ' + cached + ' fingerprinted') : '') +
+          '. Saved on this phone.';
+        return;
+      }
+      btn.textContent = 'Load audio folder';
+      hint.textContent = 'Load the folder of instruction audio. Pick the track, then arm backup. The folder location and fingerprints stay on this phone.';
+    }
+
+    async function applyAudioFiles(files, name, selectedName) {
+      const audioFiles = files.filter(isAudioFile);
+      if (!audioFiles.length) {
+        alert('No audio files found in that folder.');
+        return false;
+      }
+      if (state.mode !== 'idle' && state.mode !== 'backing') await disarm(false);
+      stopSimulate(true);
+      revokeTracks();
+      folderName = name || audioFiles[0].webkitRelativePath?.split(/[\\/]/)[0] || 'Audio folder';
+      state.tracks = audioFiles
+        .sort((a, b) => a.name.localeCompare(b.name))
+        .map(file => ({
+          id: trackIdFor(file),
+          name: file.name.replace(/^.*[\\/]/, ''),
+          file,
+          url: URL.createObjectURL(file),
+          duration: 0,
+          fpCached: false
+        }));
+      const pick = selectedName && state.tracks.find(t => t.name === selectedName);
+      state.selectedId = (pick || state.tracks[0]).id;
+      pendingDirHandle = null;
+      renderTrackList();
+      await Promise.all(state.tracks.map(probeDuration));
+      await markCachedFlags();
+      renderTrackList();
+      await saveLibraryMeta();
+      prefetchFingerprints();
+      return true;
+    }
+
+    async function collectAudioFromDir(handle, prefix, out, depth) {
+      if (depth > 3) return;
+      for await (const [name, child] of handle.entries()) {
+        if (child.kind === 'directory') {
+          await collectAudioFromDir(child, prefix + name + '/', out, depth + 1);
+        } else if (isAudioFile({ name, type: '' })) {
+          out.push(await child.getFile());
+        }
+      }
+    }
+
+    async function ensureDirPerm(handle, interactive) {
+      if (!handle.queryPermission) return true;
+      const opts = { mode: 'read' };
+      let q = await handle.queryPermission(opts);
+      if (q === 'granted') return true;
+      if (!interactive) return false;
+      q = await handle.requestPermission(opts);
+      return q === 'granted';
+    }
+
+    async function loadFromDirHandle(handle, interactive, selectedName) {
+      if (!(await ensureDirPerm(handle, interactive))) return false;
+      const files = [];
+      await collectAudioFromDir(handle, '', files, 0);
+      dirHandle = handle;
+      folderName = handle.name || 'Audio folder';
+      return applyAudioFiles(files, folderName, selectedName);
+    }
+
+    async function chooseFolder() {
+      if (pendingDirHandle) {
+        const meta = await kvGet('libraryMeta').catch(() => null);
+        const ok = await loadFromDirHandle(pendingDirHandle, true, meta?.selectedName);
+        if (ok) return;
+        pendingDirHandle = null;
+      }
+      if (window.showDirectoryPicker) {
+        try {
+          const handle = await window.showDirectoryPicker({ mode: 'read' });
+          await loadFromDirHandle(handle, true);
+          return;
+        } catch (err) {
+          if (err && err.name === 'AbortError') return;
+        }
+      }
+      $('folderInput').click();
+    }
+
+    async function restoreLibrary() {
+      try {
+        const meta = await kvGet('libraryMeta');
+        const handle = await kvGet('dirHandle');
+        if (handle) {
+          const ok = await loadFromDirHandle(handle, false, meta?.selectedName);
+          if (ok) return;
+          pendingDirHandle = handle;
+          folderName = handle.name || meta?.folderName || '';
+          if (meta?.tracks?.length) {
+            $('emptyTracks').textContent = 'Saved folder: ' + (folderName || 'audio') +
+              ' (' + meta.tracks.length + ' tracks). Tap Reopen to use it.';
+          }
+          updateFolderUi();
+          return;
+        }
+        if (meta?.tracks?.length) {
+          $('emptyTracks').textContent = 'Last folder: ' + (meta.folderName || 'audio') +
+            ' (' + meta.tracks.length + ' tracks). Load it again — stored fingerprints will attach automatically.';
+        }
+      } catch (err) {
+        console.warn('Could not restore library', err);
+      }
+      updateFolderUi();
+    }
+
+    async function forgetLibrary() {
+      if (state.mode !== 'idle' && state.mode !== 'backing') await disarm(true);
+      stopSimulate(true);
+      revokeTracks();
+      state.tracks = [];
+      state.selectedId = null;
+      dirHandle = null;
+      pendingDirHandle = null;
+      folderName = '';
+      await kvDel('dirHandle').catch(() => {});
+      await kvDel('libraryMeta').catch(() => {});
+      $('emptyTracks').textContent = 'No folder loaded yet.';
+      renderTrackList();
+      updateFolderUi();
+    }
+
+    async function forgetFingerprints() {
+      await fpClear().catch(() => {});
+      state.tracks.forEach(t => { t.fpCached = false; });
+      renderTrackList();
+    }
+
+    async function analyseTrackFile(file) {
+      ensureAudioCtx();
+      const arrayBuf = await file.arrayBuffer();
+      const buffer = await audioCtx.decodeAudioData(arrayBuf.slice(0));
+      const envelope = computeEnvelope(buffer, ENVELOPE_RATE);
+      const peak = peakOf(envelope) || 0.001;
+      const thresh = Math.max(peak * 0.08, 0.008);
+      const template = buildTemplateIndex(buffer, state.settings.fingerprintSec);
+      return { buffer, envelope, thresh, template, duration: buffer.duration };
+    }
+
+    function ensureIndexed(track, keepBuffer) {
+      const key = fpStoreKey(track.file);
+      if (fpInflight.has(key)) return fpInflight.get(key);
+      const job = (async () => {
+        const cached = await fpLoad(track.file);
+        if (cached) return { packed: cached, buffer: null };
+        const analysed = await analyseTrackFile(track.file);
+        await fpSave(track.file, analysed);
+        track.fpCached = true;
+        return { packed: packAnalysed(analysed), buffer: analysed.buffer };
+      })().finally(() => fpInflight.delete(key));
+      fpInflight.set(key, job);
+      return job;
+    }
+
+    function packAnalysed(analysed) {
+      const packed = packTemplate(analysed.template);
+      packed.envelope = analysed.envelope;
+      packed.thresh = analysed.thresh;
+      packed.fileDuration = analysed.duration;
+      return packed;
+    }
+
+    async function prefetchFingerprints() {
+      const gen = ++fpGen;
+      fpIndexBusy = true;
+      try {
+        for (const track of state.tracks.slice()) {
+          if (gen !== fpGen) return;
+          if (state.mode !== 'idle' && state.mode !== 'backing') break;
+          if (!state.tracks.includes(track) || track.fpCached) continue;
+          try {
+            await ensureIndexed(track, false);
+            updateFolderUi();
+            renderTrackList();
+          } catch (err) {
+            console.warn('Fingerprint skip', track.name, err);
+          }
+        }
+      } finally {
+        fpIndexBusy = false;
+        updateFolderUi();
+      }
     }
 
     function selectedTrack() {
@@ -568,6 +946,8 @@
         const trailSec = lockedBufferMs / 1000;
         const backupSec = backupAudio ? backupAudio.currentTime : Math.max(0, roomPosition() - trailSec);
         let line = 'Locked · backup at ' + fmtTime(backupSec) + ' · ' + trailSec.toFixed(1) + ' s behind the amp';
+        if (clipCollecting && spotMode) return line + ' · spot-checking…';
+        if (lastSpotStatus) line += ' · ' + lastSpotStatus;
         if (!fileExpectsSpeech) return line + ' · file pause (cutout ignored)';
         if (silenceSince) return line + ' · file expects speech · mic quiet';
         return line;
@@ -623,7 +1003,9 @@
       } else if (state.mode === 'armed') {
         pill.classList.add('listening');
         const trailSec = lockedBufferMs / 1000;
-        $('statusText').textContent = fileExpectsSpeech
+        $('statusText').textContent = (clipCollecting && spotMode)
+          ? 'Spot-checking lock'
+          : fileExpectsSpeech
           ? ('Listening · backup ' + trailSec.toFixed(1) + ' s behind amp')
           : ('Listening · expected pause · ' + trailSec.toFixed(1) + ' s behind');
         btn.textContent = 'Disarm';
@@ -666,10 +1048,13 @@
       state.tracks.forEach(t => {
         const li = document.createElement('li');
         li.className = t.id === state.selectedId ? 'selected' : '';
-        li.innerHTML = '<span class="name">' + escapeHtml(t.name) + '</span><span class="dur mono">' + (t.duration ? fmtTime(t.duration) : '…') + '</span>';
+        const fpMark = t.fpCached ? '<span class="fp-tag">fp</span>' : '';
+        li.innerHTML = '<span class="name">' + escapeHtml(t.name) + '</span>' + fpMark +
+          '<span class="dur mono">' + (t.duration ? fmtTime(t.duration) : '…') + '</span>';
         li.addEventListener('click', () => selectTrack(t.id));
         list.appendChild(li);
       });
+      updateFolderUi();
       updateUI();
     }
 
@@ -682,6 +1067,7 @@
       if (id !== state.selectedId) stopSimulate(true);
       state.selectedId = id;
       renderTrackList();
+      saveLibraryMeta();
     }
 
     async function probeDuration(track) {
@@ -699,31 +1085,11 @@
 
     async function handleFolderPick(ev) {
       const files = Array.from(ev.target.files || []);
-      const audioFiles = files.filter(f => /^audio\//.test(f.type) || /\.(mp3|wav|m4a|aac|ogg|flac|webm)$/i.test(f.name));
-      if (!audioFiles.length) {
-        alert('No audio files found in that folder.');
-        ev.target.value = '';
-        return;
+      const ok = await applyAudioFiles(files, files[0]?.webkitRelativePath?.split(/[\\/]/)[0] || 'Audio folder');
+      if (ok) {
+        dirHandle = null;
+        await kvDel('dirHandle').catch(() => {});
       }
-
-      if (state.mode !== 'idle' && state.mode !== 'backing') await disarm(false);
-      stopSimulate(true);
-      revokeTracks();
-
-      state.tracks = audioFiles
-        .sort((a, b) => a.name.localeCompare(b.name))
-        .map((file, i) => ({
-          id: 't' + i,
-          name: file.name.replace(/^.*[\\/]/, ''),
-          file,
-          url: URL.createObjectURL(file),
-          duration: 0
-        }));
-
-      state.selectedId = state.tracks[0]?.id || null;
-      renderTrackList();
-      await Promise.all(state.tracks.map(probeDuration));
-      renderTrackList();
       ev.target.value = '';
     }
 
@@ -968,11 +1334,14 @@
       return out;
     }
 
-    function buildTemplateIndex(buffer, sec) {
+    function buildTemplateIndex(buffer, sec, startSec) {
       const sr = buffer.sampleRate;
       const ch = buffer.getChannelData(0);
-      const n = Math.min(ch.length, Math.floor(Math.max(1, sec) * sr));
-      const slice = ch.subarray(0, n);
+      const origin = Math.max(0, startSec || 0);
+      const start = Math.min(ch.length, Math.floor(origin * sr));
+      const n = Math.min(Math.max(0, ch.length - start), Math.floor(Math.max(1, sec) * sr));
+      if (n < FP_FFT) return { index: new Map(), hashCount: 0, peakCount: 0, duration: 0, originSec: origin };
+      const slice = ch.subarray(start, start + n);
       const peaks = constellationPeaks(slice, sr);
       const hashes = hashesFromPeaks(peaks);
       const index = new Map();
@@ -982,7 +1351,7 @@
         if (!arr) { arr = []; index.set(h.hash, arr); }
         arr.push(h.t);
       }
-      return { index, hashCount: hashes.length, peakCount: peaks.length, duration: n / sr };
+      return { index, hashCount: hashes.length, peakCount: peaks.length, duration: n / sr, originSec: origin };
     }
 
     function matchClipToTemplate(samples, sampleRate, template) {
@@ -1031,7 +1400,7 @@
       captureNode.connect(captureGain);
       captureGain.connect(Ctx.destination);
       captureNode.onaudioprocess = ev => {
-        if (!clipCollecting || state.mode !== 'primed') return;
+        if (!clipCollecting || (state.mode !== 'primed' && state.mode !== 'armed')) return;
         const data = ev.inputBuffer.getChannelData(0);
         clipParts.push(new Float32Array(data));
         clipLength += data.length;
@@ -1054,14 +1423,32 @@
       clipBusy = false;
     }
 
+    function beginClipCollect() {
+      clipCollecting = true;
+      clipParts = [];
+      clipLength = 0;
+      lastClipPerfStart = performance.now() / 1000;
+    }
+
     function beginClipIfNeeded(rms) {
       if (state.mode !== 'primed' || state.analysing || clipCollecting || clipBusy) return;
       if (!templateIndex) return;
       if (rms <= state.settings.silenceThreshold) return;
-      clipCollecting = true;
-      clipParts = [];
-      clipLength = 0;
+      beginClipCollect();
       lastClipStatus = 'recording';
+      updateUI();
+    }
+
+    function maybeSpotCheck(rms) {
+      if (state.mode !== 'armed' || !trackingLocked || !fileBuffer) return;
+      if (spotChecksDone >= SPOT_MAX) return;
+      if (clipCollecting || clipBusy) return;
+      if (Date.now() < nextSpotAt) return;
+      if (!fileExpectsSpeech) return;
+      if (rms <= state.settings.silenceThreshold) return;
+      spotMode = true;
+      spotFileStart = roomPosition();
+      beginClipCollect();
       updateUI();
     }
 
@@ -1081,10 +1468,16 @@
       }
       clipParts = [];
       clipLength = 0;
+      const wasSpot = spotMode;
+      const spotStart = spotFileStart;
+      spotMode = false;
       setTimeout(() => {
         try {
-          const result = matchClipToTemplate(samples, sr, templateIndex);
-          applyClipMatch(result, need / sr * 1000);
+          if (wasSpot) applySpotMatch(samples, sr, spotStart, need / sr * 1000);
+          else {
+            const result = matchClipToTemplate(samples, sr, templateIndex);
+            applyClipMatch(result, need / sr * 1000);
+          }
         } finally {
           clipBusy = false;
         }
@@ -1103,6 +1496,9 @@
       if (good) {
         lastClipStatus = 'hit';
         confirmBadSince = null;
+        hasAlign = true;
+        alignPerfAt = lastClipPerfStart;
+        alignFileAt = result.offsetSec;
         if (!confirmStartedAt) {
           confirmStartedAt = now;
           confirmHeldMs = 0;
@@ -1120,6 +1516,30 @@
           if (now - confirmBadSince >= CONFIRM_GRACE_MS) resetConfirmHold();
         }
       }
+      updateUI();
+    }
+
+    function applySpotMatch(samples, sampleRate, fileStart, clipMs) {
+      if (state.mode !== 'armed' || !fileBuffer) {
+        lastSpotStatus = 'spot skipped';
+        if (spotChecksDone < SPOT_MAX) nextSpotAt = Date.now() + 15000;
+        updateUI();
+        return;
+      }
+      const preroll = Math.min(SPOT_PREROLL, Math.max(0, fileStart));
+      const local = buildTemplateIndex(fileBuffer, clipMs / 1000 + preroll + 0.5, Math.max(0, fileStart - preroll));
+      const result = matchClipToTemplate(samples, sampleRate, local);
+      lastMatchScore = result.score;
+      lastClipHits = result.hits;
+      lastClipContrast = result.contrast || 0;
+      lastClipOffset = (local.originSec || 0) + result.offsetSec;
+      const close = Math.abs(result.offsetSec - preroll) < 0.85;
+      const good = result.score >= state.settings.matchThreshold && result.hits >= 50 && result.contrast >= 3 && close;
+      spotChecksDone++;
+      lastSpotStatus = good
+        ? ('spot ' + spotChecksDone + '/' + SPOT_MAX + ' confirmed')
+        : ('spot ' + spotChecksDone + '/' + SPOT_MAX + ' weak · still locked');
+      if (spotChecksDone < SPOT_MAX) nextSpotAt = Date.now() + SPOT_WAIT_MS;
       updateUI();
     }
 
@@ -1298,49 +1718,135 @@
       return Math.max(1, state.settings.fingerprintSec);
     }
 
-    function paintBurstLane(lane, bursts, windowSec, t0, kind, matchedIdx, skippedIdx) {
-      lane.innerHTML = '';
-      if (!bursts.length || !windowSec) return;
-      let peak = 0.0001;
-      for (let i = 0; i < bursts.length; i++) if (bursts[i].mean > peak) peak = bursts[i].mean;
-      const matched = {};
-      const skipped = {};
-      (matchedIdx || []).forEach(i => { matched[i] = true; });
-      (skippedIdx || []).forEach(i => { skipped[i] = true; });
-      bursts.forEach((b, i) => {
-        const el = document.createElement('span');
-        el.className = 'fp-burst' + (kind === 'mic' ? ' mic' : '');
-        if (skipped[i]) el.classList.add('skipped');
-        else if (matched[i]) el.classList.add('matched');
-        const left = Math.max(0, (b.start - t0) / windowSec * 100);
-        const width = Math.max(0.6, b.dur / windowSec * 100);
-        el.style.left = left + '%';
-        el.style.width = Math.min(100 - left, width) + '%';
-        el.style.height = Math.max(6, Math.round((b.mean / peak) * 24)) + 'px';
-        lane.appendChild(el);
-      });
+    function noteMicEnvelope(rms) {
+      micEnvT.push(performance.now() / 1000);
+      micEnvV.push(rms);
+      if (micEnvT.length > 1800) {
+        micEnvT.splice(0, 400);
+        micEnvV.splice(0, 400);
+      }
+    }
+
+    function vizFileTime(perfT) {
+      if (hasAlign) return alignFileAt + (perfT - alignPerfAt);
+      const micBursts = currentMicBursts();
+      if (micBursts.length && startBursts.length) {
+        return startBursts[0].start + (perfT - micBursts[0].start);
+      }
+      return null;
+    }
+
+    function peakOfRange(arr, i0, i1) {
+      let p = 0.0001;
+      const last = Math.min(arr.length, i1);
+      for (let i = Math.max(0, i0); i < last; i++) if (arr[i] > p) p = arr[i];
+      return p;
+    }
+
+    function sizeFpCanvas(canvas) {
+      const parent = canvas.parentElement;
+      const w = Math.max(1, parent.clientWidth);
+      const h = Math.max(1, parent.clientHeight);
+      const dpr = Math.min(2, window.devicePixelRatio || 1);
+      const pw = Math.floor(w * dpr);
+      const ph = Math.floor(h * dpr);
+      if (canvas.width !== pw) canvas.width = pw;
+      if (canvas.height !== ph) canvas.height = ph;
+      return { w: pw, h: ph, dpr };
+    }
+
+    function paintEnvelope(canvas, color, markerSec, windowSec) {
+      const { w, h } = sizeFpCanvas(canvas);
+      const ctx = canvas.getContext('2d');
+      ctx.clearRect(0, 0, w, h);
+      ctx.fillStyle = color;
+      return { ctx, w, h, markerSec, windowSec };
+    }
+
+    function drawEnvelopeSeries(ctx, w, h, xs, ys, peak, windowSec) {
+      if (!xs.length || !windowSec) return;
+      const pad = 4 * (window.devicePixelRatio || 1);
+      const usable = h - pad * 2;
+      ctx.beginPath();
+      ctx.moveTo(0, h - pad);
+      let started = false;
+      for (let i = 0; i < xs.length; i++) {
+        const x = xs[i] / windowSec * w;
+        if (x < -2 || x > w + 2) continue;
+        const y = h - pad - Math.max(0, ys[i] / peak) * usable;
+        if (!started) { ctx.lineTo(x, h - pad); ctx.lineTo(x, y); started = true; }
+        else ctx.lineTo(x, y);
+      }
+      if (!started) return;
+      ctx.lineTo(w, h - pad);
+      ctx.closePath();
+      ctx.globalAlpha = 0.88;
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+
+    function drawAlignMarker(ctx, w, h, sec, windowSec) {
+      if (sec == null || sec < 0 || sec > windowSec) return;
+      const x = sec / windowSec * w;
+      ctx.strokeStyle = '#b54708';
+      ctx.lineWidth = Math.max(1, w / 400);
+      ctx.beginPath();
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, h);
+      ctx.stroke();
     }
 
     function renderFingerprintViz() {
       const viz = $('fpViz');
       if (!viz) return;
-      const show = (state.mode === 'primed' || state.mode === 'armed' || state.mode === 'cutout') && startBursts && startBursts.length;
+      const show = (state.mode === 'primed' || state.mode === 'armed' || state.mode === 'cutout') && fileEnvelope && fileEnvelope.length;
       viz.hidden = !show;
       if (!show) return;
+
       const windowSec = fpWindowSec();
-      const align = lastMatchAlign || { pairs: [], skippedMic: [], skippedFile: [] };
-      const matchedFile = (align.pairs || []).map(p => p.fileIdx);
-      const matchedMic = (align.pairs || []).map(p => p.micIdx);
-      paintBurstLane($('fpFileLane'), startBursts, windowSec, 0, 'file', matchedFile, align.skippedFile);
-      const mic = currentMicBursts();
-      const micT0 = mic.length ? mic[0].start : 0;
-      paintBurstLane($('fpMicLane'), mic, windowSec, micT0, 'mic', matchedMic, align.skippedMic);
-      const paired = (align.pairs || []).length;
-      const skipped = (align.skippedMic || []).length;
+      const fileCanvas = $('fpFileCanvas');
+      const micCanvas = $('fpMicCanvas');
+      if (!fileCanvas || !micCanvas) return;
+
+      const nFile = Math.min(fileEnvelope.length, Math.ceil(windowSec * ENVELOPE_RATE));
+      const filePeak = peakOfRange(fileEnvelope, 0, nFile);
+      const fileXs = [];
+      const fileYs = [];
+      for (let i = 0; i < nFile; i++) {
+        fileXs.push(i / ENVELOPE_RATE);
+        fileYs.push(fileEnvelope[i]);
+      }
+
+      const micXs = [];
+      const micYs = [];
+      let micPeak = 0.0001;
+      for (let i = 0; i < micEnvT.length; i++) {
+        const ft = vizFileTime(micEnvT[i]);
+        if (ft == null) continue;
+        if (ft < -0.05 || ft > windowSec + 0.05) continue;
+        micXs.push(ft);
+        micYs.push(micEnvV[i]);
+        if (micEnvV[i] > micPeak) micPeak = micEnvV[i];
+      }
+      const gain = Math.max(0.25, Math.min(8, filePeak / micPeak));
+
+      const fileDraw = paintEnvelope(fileCanvas, '#123c32', hasAlign ? alignFileAt : null, windowSec);
+      drawEnvelopeSeries(fileDraw.ctx, fileDraw.w, fileDraw.h, fileXs, fileYs, filePeak, windowSec);
+      if (hasAlign) drawAlignMarker(fileDraw.ctx, fileDraw.w, fileDraw.h, alignFileAt, windowSec);
+
+      const micDraw = paintEnvelope(micCanvas, '#1b6b45', hasAlign ? alignFileAt : null, windowSec);
+      const scaled = micYs.map(v => v * gain);
+      drawEnvelopeSeries(micDraw.ctx, micDraw.w, micDraw.h, micXs, scaled, filePeak, windowSec);
+      if (hasAlign) drawAlignMarker(micDraw.ctx, micDraw.w, micDraw.h, alignFileAt, windowSec);
+
+      $('fpFileLabel').textContent = 'File fingerprint';
+      $('fpMicLabel').textContent = hasAlign ? 'Heard (lined up to file)' : 'Heard';
+      const alignBit = hasAlign ? (' · lined up @ ' + fmtTime(alignFileAt)) : '';
+      const spotBit = lastSpotStatus ? (' · ' + lastSpotStatus) : '';
       $('fpMeta').textContent =
-        'First ' + windowSec + ' s of file · ' + startBursts.length + ' bursts · ' +
+        'First ' + windowSec + ' s of file · ' +
         (templateIndex ? (templateIndex.hashCount + ' peak-hashes') : 'no hashes') +
-        ' · clip ' + lastClipHits + ' hits';
+        ' · clip ' + lastClipHits + ' hits' + alignBit + spotBit;
     }
 
     function matchBurstSequence(micBursts, fileBurstList) {
@@ -1442,6 +1948,7 @@
       const pct = Math.min(100, (rms / MIC_METER_MAX) * 100);
       $('micMeterFill').style.width = pct + '%';
       noteAmbient(rms);
+      noteMicEnvelope(rms);
       updateCalibratorUi(rms);
       maybeAutoCalibrateSilence();
 
@@ -1452,27 +1959,15 @@
       if (state.mode === 'primed') {
         beginClipIfNeeded(rms);
         tickPrimedViz();
-      } else if (state.mode === 'armed') tickArmed(rms);
+      } else if (state.mode === 'armed') {
+        maybeSpotCheck(rms);
+        tickArmed(rms);
+      }
 
       updateProgressDisplay();
     }
 
     function tickPrimedViz() {
-      const micBursts = currentMicBursts();
-      if (!startBursts.length) {
-        lastMatchAlign = { pairs: [], skippedMic: [], skippedFile: [] };
-        updateUI();
-        return;
-      }
-      if (!micBursts.length) {
-        lastMatchBurstCount = 0;
-        lastMatchAlign = { pairs: [], skippedMic: [], skippedFile: [] };
-        updateUI();
-        return;
-      }
-      const match = matchBurstSequence(micBursts, startBursts);
-      lastMatchAlign = match;
-      lastMatchBurstCount = match.count;
       updateUI();
     }
 
@@ -1488,6 +1983,12 @@
       silenceSince = null;
       resetConfirmHold();
       inLogicalSync = true;
+      hasAlign = true;
+      alignPerfAt = performance.now() / 1000;
+      alignFileAt = roomNow;
+      spotChecksDone = 0;
+      nextSpotAt = Date.now() + SPOT_WAIT_MS;
+      lastSpotStatus = 'spot check in ~1 min';
 
       if (pendingPlayTimer) {
         clearTimeout(pendingPlayTimer);
@@ -1595,22 +2096,24 @@
         listenTimer = setInterval(tickListen, LISTEN_MS);
         await requestWakeLock();
 
-        const arrayBuf = await track.file.arrayBuffer();
-        fileBuffer = await audioCtx.decodeAudioData(arrayBuf.slice(0));
-        fileDuration = fileBuffer.duration;
-        fileEnvelope = computeEnvelope(fileBuffer, ENVELOPE_RATE);
-        const peak = peakOf(fileEnvelope) || 0.001;
-        fileSpeechThreshold = Math.max(peak * 0.08, 0.008);
-        fileBursts = extractBursts(fileEnvelope, fileSpeechThreshold);
-        const fpEnd = Math.min(fileEnvelope.length, Math.ceil(state.settings.fingerprintSec * ENVELOPE_RATE));
-        startBursts = extractBursts(fileEnvelope, fileSpeechThreshold, 0, fpEnd);
+        fileBuffer = null;
+        const indexed = await ensureIndexed(track, true);
+        hydrateFingerprint(indexed.packed);
+        if (indexed.buffer) fileBuffer = indexed.buffer;
+        track.fpCached = true;
         lastMatchAlign = { pairs: [], skippedMic: [], skippedFile: [] };
-        templateIndex = buildTemplateIndex(fileBuffer, state.settings.fingerprintSec);
         lastClipStatus = 'waiting';
         lastClipHits = 0;
         lastClipOffset = 0;
         lastClipContrast = 0;
         lastMatchScore = 0;
+        hasAlign = false;
+        micEnvT = [];
+        micEnvV = [];
+        spotMode = false;
+        spotChecksDone = 0;
+        nextSpotAt = 0;
+        lastSpotStatus = '';
         startClipCapture();
         if (!captureNode) throw new Error('This browser cannot capture mic clips for matching.');
         track.duration = fileDuration;
@@ -1638,6 +2141,12 @@
         state.analysing = false;
         renderTrackList();
         updateUI();
+        if (!fileBuffer && track.file) {
+          track.file.arrayBuffer()
+            .then(ab => audioCtx.decodeAudioData(ab.slice(0)))
+            .then(buf => { if (state.mode !== 'idle') fileBuffer = buf; })
+            .catch(err => console.warn('Background decode failed', err));
+        }
       } catch (err) {
         console.error(err);
         await disarm(false);
@@ -1672,6 +2181,13 @@
       startBursts = [];
       liveBurst = null;
       completedMicBursts = [];
+      micEnvT = [];
+      micEnvV = [];
+      hasAlign = false;
+      spotMode = false;
+      spotChecksDone = 0;
+      nextSpotAt = 0;
+      lastSpotStatus = '';
       state.analysing = false;
 
       releaseWakeLock();
@@ -1756,8 +2272,10 @@
       updateUI();
     }
 
-    $('btnLoadFolder').addEventListener('click', () => $('folderInput').click());
+    $('btnLoadFolder').addEventListener('click', () => chooseFolder());
     $('folderInput').addEventListener('change', handleFolderPick);
+    $('btnForgetLibrary').addEventListener('click', () => forgetLibrary());
+    $('btnForgetFingerprints').addEventListener('click', () => forgetFingerprints());
     $('btnSimulate').addEventListener('click', toggleSimulate);
 
     $('btnMain').addEventListener('click', async () => {
@@ -1791,6 +2309,7 @@
     $('fingerprintSec').addEventListener('input', e => {
       state.settings.fingerprintSec = +e.target.value;
       $('fingerprintSecVal').textContent = state.settings.fingerprintSec + ' s';
+      markCachedFlags().then(() => renderTrackList()).catch(() => {});
     });
     $('clipSec').addEventListener('input', e => {
       state.settings.clipSec = +e.target.value;
@@ -1817,6 +2336,7 @@
     });
 
     updateUI();
+    restoreLibrary();
   </script>
   <script>window.PWA_INSTALL = { slug: 'audio-backup-helper', name: 'Back Me Up' };</script>
   <script src="./install.js?v=2"></script>
