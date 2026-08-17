@@ -220,13 +220,31 @@
     }
 
     .mic-meter {
-      height: 6px; background: var(--bg); border-radius: 999px;
+      position: relative; height: 8px; background: var(--bg); border-radius: 999px;
       border: 1px solid var(--line); overflow: hidden; margin-top: 10px;
     }
     .mic-meter-fill {
       height: 100%; width: 0%; background: var(--ok);
       border-radius: 999px; transition: width 0.08s linear;
     }
+    .mic-meter-mark {
+      position: absolute; top: 0; bottom: 0; width: 2px;
+      background: var(--warn); transform: translateX(-1px); pointer-events: none;
+    }
+    .cal-meter {
+      position: relative; flex: 1.2; height: 10px;
+      background: var(--bg); border: 1px solid var(--line);
+      border-radius: 999px; overflow: hidden;
+    }
+    .cal-fill {
+      height: 100%; width: 0%; background: var(--ok);
+      border-radius: 999px; transition: width 0.12s linear;
+    }
+    .cal-mark {
+      position: absolute; top: 0; bottom: 0; width: 2px;
+      background: var(--warn); transform: translateX(-1px);
+    }
+    .cal-hint { margin: 0 0 10px; font-size: 0.8rem; }
     .sync-line {
       margin: 10px 0 0;
       font-size: 0.88rem;
@@ -313,6 +331,7 @@
     </div>
     <div class="mic-meter" id="micMeterWrap" hidden>
       <div class="mic-meter-fill" id="micMeterFill"></div>
+      <div class="mic-meter-mark" id="micMeterMark"></div>
     </div>
     <p class="sync-line" id="syncLine" hidden></p>
     <div class="fp-viz" id="fpViz" hidden>
@@ -340,6 +359,15 @@
       <span class="val mono" id="silenceThresholdVal">0.02</span>
     </div>
     <div class="setting-row">
+      <span style="flex:1;font-size:0.88rem">Room noise now</span>
+      <div class="cal-meter" id="calMeter" title="Green = current room. Orange mark = silence gate.">
+        <div class="cal-fill" id="calRoomFill"></div>
+        <div class="cal-mark" id="calGateMark"></div>
+      </div>
+      <span class="val mono" id="calRoomVal">—</span>
+    </div>
+    <p class="hint cal-hint" id="calHint">While waiting, the gate auto-sets just above room noise. Drag the slider to lock it.</p>
+    <div class="setting-row">
       <label for="silenceDuration">Cutout after unexpected silence</label>
       <input type="range" id="silenceDuration" min="400" max="30000" step="200" value="800" />
       <span class="val mono" id="silenceDurationVal">800 ms</span>
@@ -361,7 +389,7 @@
     </div>
   </details>
 
-  <p class="ver mono" id="appVer">v1.3.3</p>
+  <p class="ver mono" id="appVer">v1.3.5</p>
 
   <div class="bottom-bar">
     <button type="button" class="btn primary" id="btnMain" disabled>Back me up</button>
@@ -378,7 +406,7 @@
 
   <script>
     const $ = id => document.getElementById(id);
-    const APP_VER = '1.3.3';
+    const APP_VER = '1.3.5';
 
     const ENVELOPE_RATE = 20;
     const LISTEN_MS = 50;
@@ -393,6 +421,11 @@
     const RECENT_SPEECH_MS = 2500;
     const HOLD_CONTINUE_RATIO = 0.7;
     const ALIGN_MATCH_FLOOR = 0.28;
+    const SILENCE_MIN = 0.005;
+    const SILENCE_MAX = 0.08;
+    const AMBIENT_SAMPLES = 40;
+    const AMBIENT_MULT = 2.4;
+    const MIC_METER_MAX = 0.15;
 
     const state = {
       tracks: [],
@@ -436,6 +469,9 @@
     let liveBurst = null;
     let completedMicBursts = [];
     let listenTimer = null;
+    let ambientRing = [];
+    let ambientRms = 0;
+    let silenceManual = false;
     let confirmStartedAt = null;
     let confirmPositionSec = 0;
     let confirmHeldMs = 0;
@@ -694,6 +730,61 @@
       let sum = 0;
       for (let i = 0; i < timeDomainBuf.length; i++) sum += timeDomainBuf[i] * timeDomainBuf[i];
       return Math.sqrt(sum / timeDomainBuf.length);
+    }
+
+    function noteAmbient(rms) {
+      ambientRing.push(rms);
+      if (ambientRing.length > AMBIENT_SAMPLES) ambientRing.shift();
+      const sorted = ambientRing.slice().sort((a, b) => a - b);
+      ambientRms = sorted[Math.floor(sorted.length * 0.3)] || 0;
+    }
+
+    function suggestedSilenceGate() {
+      const raw = ambientRms * AMBIENT_MULT + 0.004;
+      const stepped = Math.round(raw / 0.005) * 0.005;
+      return Math.min(SILENCE_MAX, Math.max(SILENCE_MIN, stepped));
+    }
+
+    function setSilenceThreshold(val) {
+      const v = Math.min(SILENCE_MAX, Math.max(SILENCE_MIN, val));
+      state.settings.silenceThreshold = v;
+      const slider = $('silenceThreshold');
+      if (slider) slider.value = String(v);
+      $('silenceThresholdVal').textContent = v.toFixed(3);
+      updateCalibratorUi();
+    }
+
+    function updateCalibratorUi(liveRms) {
+      const live = liveRms == null ? ambientRms : liveRms;
+      const gate = state.settings.silenceThreshold;
+      const livePct = Math.min(100, (live / SILENCE_MAX) * 100);
+      const gatePct = Math.min(100, (gate / SILENCE_MAX) * 100);
+      const fill = $('calRoomFill');
+      const mark = $('calGateMark');
+      const micMark = $('micMeterMark');
+      if (fill) fill.style.width = livePct + '%';
+      if (mark) mark.style.left = gatePct + '%';
+      if (micMark) micMark.style.left = Math.min(100, (gate / MIC_METER_MAX) * 100) + '%';
+      const lab = $('calRoomVal');
+      if (lab) lab.textContent = live ? live.toFixed(3) : '—';
+      const hint = $('calHint');
+      if (hint) {
+        if (silenceManual) hint.textContent = 'Gate locked by the slider. Start Back me up again to auto-calibrate from room noise.';
+        else if (state.mode === 'primed' && !confirmStartedAt) {
+          hint.textContent = 'Room ' + live.toFixed(3) + ' · floor ' + ambientRms.toFixed(3) + ' · gate ' + gate.toFixed(3) + ' (auto)';
+        } else {
+          hint.textContent = 'Green = mic level now. Orange mark = silence gate. Auto-sets while waiting; drag the slider to lock it.';
+        }
+      }
+    }
+
+    function maybeAutoCalibrateSilence() {
+      if (silenceManual) return;
+      if (state.mode !== 'primed' || state.analysing || confirmStartedAt) return;
+      if (testAudio && !testAudio.paused) return;
+      if (ambientRing.length < 20) return;
+      const next = suggestedSilenceGate();
+      if (Math.abs(next - state.settings.silenceThreshold) >= 0.005) setSilenceThreshold(next);
     }
 
     function peakOf(arr) {
@@ -1053,8 +1144,11 @@
 
     function tickListen() {
       const rms = rmsFromAnalyser();
-      const pct = Math.min(100, (rms / 0.15) * 100);
+      const pct = Math.min(100, (rms / MIC_METER_MAX) * 100);
       $('micMeterFill').style.width = pct + '%';
+      noteAmbient(rms);
+      updateCalibratorUi(rms);
+      maybeAutoCalibrateSilence();
 
       noteMicEnergy(rms);
       if (rms > state.settings.silenceThreshold) lastSpeechAt = Date.now();
@@ -1274,6 +1368,9 @@
         silenceSince = null;
         inLogicalSync = false;
         fileExpectsSpeech = false;
+        ambientRing = [];
+        ambientRms = 0;
+        silenceManual = false;
         resetConfirmHold();
         lockPositionSec = 0;
         lockClockAt = 0;
@@ -1425,8 +1522,8 @@
       $('bufferDelayVal').textContent = fmtSettingMs(state.settings.bufferDelayMs);
     });
     $('silenceThreshold').addEventListener('input', e => {
-      state.settings.silenceThreshold = +e.target.value;
-      $('silenceThresholdVal').textContent = state.settings.silenceThreshold.toFixed(3);
+      silenceManual = true;
+      setSilenceThreshold(+e.target.value);
     });
     $('silenceDuration').addEventListener('input', e => {
       state.settings.silenceDurationMs = +e.target.value;
@@ -1459,6 +1556,6 @@
     updateUI();
   </script>
   <script>window.PWA_INSTALL = { slug: 'audio-backup-helper', name: 'Back Me Up' };</script>
-  <script src="./install.js?v=1"></script>
+  <script src="./install.js?v=2"></script>
 </body>
 </html>
