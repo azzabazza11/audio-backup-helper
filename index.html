@@ -11,7 +11,7 @@
   <meta name="description" content="Arm a backup audio track, listen via mic, and take over if the main amplifier cuts out." />
   <link rel="manifest" href="./manifest.webmanifest" />
   <link rel="icon" href="./icon.svg" type="image/svg+xml" />
-  <link rel="apple-touch-icon" href="./icon.svg" />
+  <link rel="apple-touch-icon" href="./icon-192.png" />
   <title>Back Me Up — Audio Backup Helper</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -265,6 +265,7 @@
       </svg>
     </div>
     <h1>Back Me Up</h1>
+    <button type="button" class="btn ghost" id="btn-install" hidden>Install</button>
     <button type="button" class="btn ghost" id="btnReload" title="Reload app">↻</button>
   </header>
 
@@ -345,7 +346,7 @@
 
   <script>
     const $ = id => document.getElementById(id);
-    const APP_VER = '1.2.0';
+    const APP_VER = '1.2.1';
 
     const ENVELOPE_RATE = 20;
     const LISTEN_MS = 50;
@@ -1229,5 +1230,7 @@
 
     updateUI();
   </script>
+  <script>window.PWA_INSTALL = { slug: 'audio-backup-helper', name: 'Back Me Up' };</script>
+  <script src="./install.js?v=1"></script>
 </body>
 </html>

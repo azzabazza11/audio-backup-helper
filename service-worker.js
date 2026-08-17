@@ -1,9 +1,12 @@
-const CACHE = 'back-me-up-v1.2.0';
+const CACHE = 'back-me-up-v1.2.1';
 const ASSETS = [
   './',
   './index.html',
   './manifest.webmanifest',
-  './icon.svg'
+  './icon.svg',
+  './icon-192.png',
+  './icon-512.png',
+  './install.js'
 ];
 
 self.addEventListener('install', event => {
