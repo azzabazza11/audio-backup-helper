@@ -1,4 +1,4 @@
-const CACHE = 'back-me-up-v1.3.1';
+const CACHE = 'back-me-up-v1.3.2';
 const ASSETS = [
   './',
   './index.html',

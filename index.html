@@ -328,13 +328,13 @@
       <span class="val mono" id="matchThresholdVal">0.45</span>
     </div>
     <div class="setting-row">
-      <label for="confirmHold">Hold confidence before lock</label>
+      <label for="confirmHold">Hold match before lock</label>
       <input type="range" id="confirmHold" min="3000" max="10000" step="500" value="5000" />
       <span class="val mono" id="confirmHoldVal">5 s</span>
     </div>
   </details>
 
-  <p class="ver mono" id="appVer">v1.3.1</p>
+  <p class="ver mono" id="appVer">v1.3.2</p>
 
   <div class="bottom-bar">
     <button type="button" class="btn primary" id="btnMain" disabled>Back me up</button>
@@ -351,7 +351,7 @@
 
   <script>
     const $ = id => document.getElementById(id);
-    const APP_VER = '1.3.1';
+    const APP_VER = '1.3.2';
 
     const ENVELOPE_RATE = 20;
     const LISTEN_MS = 50;
@@ -362,6 +362,9 @@
     const MAX_MATCH_BURSTS = 4;
     const FILE_END_THRESHOLD = 0.97;
     const FILE_LOOKAHEAD_SEC = 0.8;
+    const CONFIRM_GRACE_MS = 2500;
+    const RECENT_SPEECH_MS = 2500;
+    const HOLD_CONTINUE_RATIO = 0.7;
 
     const state = {
       tracks: [],
@@ -406,6 +409,9 @@
     let listenTimer = null;
     let confirmStartedAt = null;
     let confirmPositionSec = 0;
+    let confirmHeldMs = 0;
+    let confirmLastTick = 0;
+    let confirmBadSince = null;
     let lockPositionSec = 0;
     let lockClockAt = 0;
     let lockedBufferMs = 0;
@@ -442,23 +448,31 @@
       updateUI();
     }
 
+    function resetConfirmHold() {
+      confirmStartedAt = null;
+      confirmPositionSec = 0;
+      confirmHeldMs = 0;
+      confirmLastTick = 0;
+      confirmBadSince = null;
+    }
+
     function syncLineText() {
       if (state.analysing) return 'Reading the file’s speech bursts…';
       if (state.mode === 'primed') {
-        if (lastMatchGated) {
-          if (lastMatchBurstCount > 0 && lastMatchBurstCount < MIN_LOCK_BURSTS) {
-            return 'Heard: speech · need ' + MIN_LOCK_BURSTS + ' bursts (' + lastMatchBurstCount + ' so far)';
-          }
-          return 'Heard: quiet · match waits for speech (silence is ignored)';
+        const matchPct = Math.round(lastMatchScore * 100);
+        if (lastMatchGated && lastMatchBurstCount > 0 && lastMatchBurstCount < MIN_LOCK_BURSTS) {
+          return 'Match waits for ' + MIN_LOCK_BURSTS + ' speech bursts (' + lastMatchBurstCount + ' so far)';
         }
         if (confirmStartedAt) {
-          const heldMs = Date.now() - confirmStartedAt;
           const needMs = state.settings.confirmHoldMs;
-          return 'Confirming… ' + (heldMs / 1000).toFixed(1) + ' / ' + (needMs / 1000).toFixed(1) + ' s · match ' + Math.round(lastMatchScore * 100) + '% · ' + lastMatchBurstCount + ' bursts';
+          const holdBit = 'hold ' + (confirmHeldMs / 1000).toFixed(1) + ' / ' + (needMs / 1000).toFixed(1) + ' s';
+          if (confirmBadSince) {
+            return 'Match ' + matchPct + '% · ' + holdBit + ' (paused through a gap)';
+          }
+          return 'Match ' + matchPct + '% · ' + holdBit + ' · ' + lastMatchBurstCount + ' bursts';
         }
-        const n = lastMatchBurstCount;
-        const burstBit = n ? ' · ' + n + ' speech burst' + (n === 1 ? '' : 's') : '';
-        return 'Heard: speech · match ' + Math.round(lastMatchScore * 100) + '%' + burstBit;
+        if (lastMatchGated) return 'Heard: quiet · match waits for speech';
+        return 'Match ' + matchPct + '% · hold not started yet · ' + lastMatchBurstCount + ' bursts';
       }
       if (state.mode === 'armed') {
         const trailSec = lockedBufferMs / 1000;
@@ -501,8 +515,11 @@
         if (state.analysing) {
           $('statusText').textContent = 'Analysing track';
         } else if (confirmStartedAt) {
-          const heldMs = Date.now() - confirmStartedAt;
-          $('statusText').textContent = 'Confirming… ' + (heldMs / 1000).toFixed(1) + ' / ' + (state.settings.confirmHoldMs / 1000).toFixed(1) + ' s';
+          const held = (confirmHeldMs / 1000).toFixed(1);
+          const need = (state.settings.confirmHoldMs / 1000).toFixed(1);
+          $('statusText').textContent = confirmBadSince
+            ? ('Hold paused ' + held + ' / ' + need + ' s')
+            : ('Holding match… ' + held + ' / ' + need + ' s');
         } else {
           $('statusText').textContent = 'Waiting for speech';
         }
@@ -930,41 +947,56 @@
         lastMatchGated = true;
         lastMatchScore = 0;
         lastMatchBurstCount = 0;
-        confirmStartedAt = null;
+        resetConfirmHold();
         updateUI();
         return;
       }
 
       const match = matchBurstSequence(micBursts, startBursts);
-      lastMatchGated = match.gated || micBursts.length < MIN_LOCK_BURSTS;
-      lastMatchScore = lastMatchGated ? 0 : match.score;
       lastMatchBurstCount = match.count;
-      updateUI();
+      const enoughBursts = micBursts.length >= MIN_LOCK_BURSTS;
+      lastMatchGated = match.gated || !enoughBursts;
+      if (!lastMatchGated) lastMatchScore = match.score;
 
       const enoughSpeech = speechSeconds(micBursts) >= MIN_LOCK_SPEECH_SEC;
       const hearing = rms > state.settings.silenceThreshold || !!liveBurst;
-      const canHold = !lastMatchGated
-        && micBursts.length >= MIN_LOCK_BURSTS
-        && enoughSpeech
-        && hearing
-        && match.score >= state.settings.matchThreshold;
+      const recentSpeech = hearing || (Date.now() - lastSpeechAt < RECENT_SPEECH_MS);
+      const score = match.gated ? 0 : match.score;
+      const aboveStart = score >= state.settings.matchThreshold;
+      const aboveContinue = score >= state.settings.matchThreshold * HOLD_CONTINUE_RATIO;
 
-      if (!canHold) {
-        confirmStartedAt = null;
+      const canStart = !match.gated && enoughBursts && enoughSpeech && recentSpeech && aboveStart;
+      const canContinue = !!confirmStartedAt && recentSpeech && (aboveContinue || aboveStart);
+
+      const now = Date.now();
+
+      if (canStart || canContinue) {
+        confirmBadSince = null;
+        if (!confirmStartedAt) {
+          confirmStartedAt = now;
+          confirmLastTick = now;
+          confirmHeldMs = 0;
+          confirmPositionSec = match.position;
+        } else {
+          confirmHeldMs += now - confirmLastTick;
+          confirmLastTick = now;
+          if (aboveStart) confirmPositionSec = match.position;
+        }
+        if (confirmHeldMs >= state.settings.confirmHoldMs) {
+          activateSync(confirmPositionSec, confirmHeldMs);
+          return;
+        }
+        updateUI();
         return;
       }
 
-      if (!confirmStartedAt) {
-        confirmStartedAt = Date.now();
-        confirmPositionSec = match.position;
+      if (confirmStartedAt) {
+        confirmLastTick = now;
+        if (!confirmBadSince) confirmBadSince = now;
+        if (now - confirmBadSince >= CONFIRM_GRACE_MS) resetConfirmHold();
       }
 
-      const heldMs = Date.now() - confirmStartedAt;
-      if (heldMs >= state.settings.confirmHoldMs) {
-        activateSync(confirmPositionSec, heldMs);
-      } else {
-        updateUI();
-      }
+      updateUI();
     }
 
     async function activateSync(fingerprintSec, confirmMs) {
@@ -977,7 +1009,7 @@
       trackedPosition = Math.max(0, roomNow - trailMs / 1000);
       lastSpeechAt = Date.now();
       silenceSince = null;
-      confirmStartedAt = null;
+      resetConfirmHold();
       inLogicalSync = true;
 
       if (pendingPlayTimer) {
@@ -1107,8 +1139,7 @@
         silenceSince = null;
         inLogicalSync = false;
         fileExpectsSpeech = false;
-        confirmStartedAt = null;
-        confirmPositionSec = 0;
+        resetConfirmHold();
         lockPositionSec = 0;
         lockClockAt = 0;
         lockedBufferMs = 0;
@@ -1162,8 +1193,7 @@
       lastMatchBurstCount = 0;
       inLogicalSync = false;
       fileExpectsSpeech = false;
-      confirmStartedAt = null;
-      confirmPositionSec = 0;
+      resetConfirmHold();
       lockPositionSec = 0;
       lockClockAt = 0;
       lockedBufferMs = 0;
