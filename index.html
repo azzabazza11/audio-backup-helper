@@ -227,6 +227,17 @@
       height: 100%; width: 0%; background: var(--ok);
       border-radius: 999px; transition: width 0.08s linear;
     }
+    .sync-line {
+      margin: 10px 0 0;
+      font-size: 0.88rem;
+      color: var(--muted);
+      line-height: 1.4;
+    }
+    .sync-line strong { color: var(--ink); font-weight: 600; }
+    .test-row {
+      display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap;
+    }
+    .test-row .btn { flex: 1; min-width: 140px; }
 
     @media (prefers-reduced-motion: reduce) {
       *, *::before, *::after {
@@ -252,7 +263,7 @@
 
   <section class="card" id="setupCard">
     <h2>Audio folder</h2>
-    <p class="hint">Load the folder of instruction audio. Pick the track, then arm backup — the mic listens for the start and auto-syncs when it hears a match.</p>
+    <p class="hint">Load the folder of instruction audio. Pick the track, then arm backup. The file is analysed so pauses in the lesson are expected — cutout only fires if the mic goes quiet where the file still has speech.</p>
     <button type="button" class="btn primary" id="btnLoadFolder" style="margin-top:12px;width:100%">Load audio folder</button>
     <input type="file" id="folderInput" webkitdirectory multiple accept="audio/*" hidden />
     <ul class="track-list" id="trackList" hidden></ul>
@@ -275,13 +286,17 @@
     <div class="mic-meter" id="micMeterWrap" hidden>
       <div class="mic-meter-fill" id="micMeterFill"></div>
     </div>
+    <p class="sync-line" id="syncLine" hidden></p>
+    <div class="test-row" id="testRow" hidden>
+      <button type="button" class="btn" id="btnSimulate">Simulate main amp</button>
+    </div>
   </section>
 
   <details class="settings card">
     <summary>Settings</summary>
     <div class="setting-row">
       <label for="bufferDelay">Buffer delay</label>
-      <input type="range" id="bufferDelay" min="500" max="3000" step="100" value="1500" />
+      <input type="range" id="bufferDelay" min="500" max="30000" step="500" value="1500" />
       <span class="val mono" id="bufferDelayVal">1.5 s</span>
     </div>
     <div class="setting-row">
@@ -290,8 +305,8 @@
       <span class="val mono" id="silenceThresholdVal">0.02</span>
     </div>
     <div class="setting-row">
-      <label for="silenceDuration">Cutout after silence</label>
-      <input type="range" id="silenceDuration" min="400" max="2000" step="100" value="800" />
+      <label for="silenceDuration">Cutout after unexpected silence</label>
+      <input type="range" id="silenceDuration" min="400" max="30000" step="200" value="800" />
       <span class="val mono" id="silenceDurationVal">800 ms</span>
     </div>
     <div class="setting-row">
@@ -301,8 +316,8 @@
     </div>
     <div class="setting-row">
       <label for="matchThreshold">Start match confidence</label>
-      <input type="range" id="matchThreshold" min="0.25" max="0.7" step="0.05" value="0.4" />
-      <span class="val mono" id="matchThresholdVal">0.40</span>
+      <input type="range" id="matchThreshold" min="0.25" max="0.7" step="0.05" value="0.45" />
+      <span class="val mono" id="matchThresholdVal">0.45</span>
     </div>
   </details>
 
@@ -313,7 +328,7 @@
   <div class="overlay" id="cutoutOverlay" role="dialog" aria-labelledby="cutoutTitle">
     <div class="overlay-card">
       <h2 id="cutoutTitle">Main audio stopped</h2>
-      <p>Take over from the synced position?</p>
+      <p>Mic went quiet where this file still has speech. Take over from the synced position?</p>
       <button type="button" class="btn primary" id="btnTakeOver">Take Over</button>
       <button type="button" class="btn" id="btnDismissCutout" style="margin-top:10px">Keep listening</button>
     </div>
@@ -323,24 +338,27 @@
     const $ = id => document.getElementById(id);
 
     const ENVELOPE_RATE = 20;
-    const MIC_WINDOW_SEC = 3;
-    const PRIMED_MIC_SEC = 2.5;
-    const TRACK_INTERVAL_MS = 250;
-    const SPEECH_RECENT_MS = 30000;
-    const FILE_END_THRESHOLD = 0.95;
-    const EMA_ALPHA = 0.35;
-    const MATCH_CONFIRM_TICKS = 3;
+    const LISTEN_MS = 50;
+    const MIN_BURST_SEC = 0.18;
+    const MIN_LOCK_SPEECH_SEC = 0.4;
+    const SHAPE_POINTS = 16;
+    const MAX_MATCH_BURSTS = 4;
+    const FILE_END_THRESHOLD = 0.97;
+    const FILE_LOOKAHEAD_SEC = 0.8;
+    const MATCH_CONFIRM_TICKS = 2;
+    const DRIFT_SEARCH_SEC = 5;
 
     const state = {
       tracks: [],
       selectedId: null,
       mode: 'idle',
+      analysing: false,
       settings: {
         bufferDelayMs: 1500,
         silenceThreshold: 0.02,
         silenceDurationMs: 800,
         fingerprintSec: 15,
-        matchThreshold: 0.4
+        matchThreshold: 0.45
       }
     };
 
@@ -351,26 +369,42 @@
     let timeDomainBuf = null;
     let fileBuffer = null;
     let fileEnvelope = null;
-    let startFingerprint = null;
+    let fileSpeechThreshold = 0.08;
     let fileDuration = 0;
     let backupAudio = null;
+    let testAudio = null;
     let wakeLock = null;
 
     let trackedPosition = 0;
-    let smoothedPosition = 0;
     let lastSpeechAt = 0;
     let silenceSince = null;
-    let micEnvelopeRing = [];
-    let trackTimer = null;
-    let meterTimer = null;
     let matchStreak = 0;
     let lastMatchScore = 0;
+    let lastMatchGated = true;
+    let lastMatchBurstCount = 0;
+    let inLogicalSync = false;
+    let fileExpectsSpeech = false;
+    let fileBursts = [];
+    let startBursts = [];
+    let liveBurst = null;
+    let completedMicBursts = [];
+    let armClockAt = 0;
+    let armPositionAt = 0;
+    let listenTimer = null;
 
     function fmtTime(sec) {
       if (!isFinite(sec) || sec < 0) sec = 0;
       const m = Math.floor(sec / 60);
       const s = Math.floor(sec % 60);
       return m + ':' + String(s).padStart(2, '0');
+    }
+
+    function fmtSettingMs(ms) {
+      if (ms >= 1000) {
+        const sec = ms / 1000;
+        return (ms % 1000 === 0 ? sec.toFixed(0) : sec.toFixed(1)) + ' s';
+      }
+      return ms + ' ms';
     }
 
     function selectedTrack() {
@@ -386,6 +420,24 @@
     function setMode(mode) {
       state.mode = mode;
       updateUI();
+    }
+
+    function syncLineText() {
+      if (state.analysing) return 'Reading the file’s speech bursts…';
+      if (state.mode === 'primed') {
+        if (lastMatchGated) return 'Heard: quiet · match waits for speech (silence is ignored)';
+        const n = lastMatchBurstCount;
+        const burstBit = n ? ' · ' + n + ' speech burst' + (n === 1 ? '' : 's') : '';
+        return 'Heard: speech · match ' + Math.round(lastMatchScore * 100) + '%' + burstBit;
+      }
+      if (state.mode === 'armed') {
+        const behind = (state.settings.bufferDelayMs / 1000).toFixed(1) + ' s behind';
+        if (!fileExpectsSpeech) return 'In sync · file pause (cutout ignored) · ' + behind;
+        if (silenceSince) return 'File expects speech · mic quiet · ' + behind;
+        return 'In sync · file speech · ' + behind;
+      }
+      if (state.mode === 'cutout') return 'Lost logical sync — silence where the file still has speech';
+      return '';
     }
 
     function updateUI() {
@@ -405,43 +457,47 @@
       const pill = $('statusPill');
       pill.className = 'status-pill';
       const btn = $('btnMain');
+      const showMic = state.mode === 'primed' || state.mode === 'armed' || state.mode === 'cutout';
 
       if (state.mode === 'idle') {
         $('statusText').textContent = hasSelection ? 'Ready' : 'Select a track';
         btn.textContent = 'Back me up';
         btn.className = 'btn primary';
         btn.disabled = !hasSelection;
-        $('micMeterWrap').hidden = true;
       } else if (state.mode === 'primed') {
         pill.classList.add('waiting');
-        const matchHint = lastMatchScore > 0 ? ' · match ' + Math.round(lastMatchScore * 100) + '%' : '';
-        $('statusText').textContent = 'Waiting for audio' + matchHint;
+        $('statusText').textContent = state.analysing ? 'Analysing track' : 'Waiting for speech';
         btn.textContent = 'Cancel';
         btn.className = 'btn';
         btn.disabled = false;
-        $('micMeterWrap').hidden = false;
       } else if (state.mode === 'armed') {
         pill.classList.add('listening');
-        $('statusText').textContent = 'Listening · ' + (state.settings.bufferDelayMs / 1000).toFixed(1) + ' s behind';
+        $('statusText').textContent = fileExpectsSpeech
+          ? ('Listening · ' + (state.settings.bufferDelayMs / 1000).toFixed(1) + ' s behind')
+          : 'Listening · expected pause';
         btn.textContent = 'Disarm';
         btn.className = 'btn';
         btn.disabled = false;
-        $('micMeterWrap').hidden = false;
       } else if (state.mode === 'cutout') {
         pill.classList.add('cutout');
         $('statusText').textContent = 'Cutout detected';
         btn.textContent = 'Disarm';
         btn.className = 'btn';
         btn.disabled = false;
-        $('micMeterWrap').hidden = false;
       } else if (state.mode === 'backing') {
         pill.classList.add('playing');
         $('statusText').textContent = 'Playing backup';
         btn.textContent = 'Stop';
         btn.className = 'btn danger';
         btn.disabled = false;
-        $('micMeterWrap').hidden = true;
       }
+
+      $('micMeterWrap').hidden = !showMic;
+      $('syncLine').hidden = !showMic;
+      if (showMic) $('syncLine').textContent = syncLineText();
+      $('testRow').hidden = !hasSelection || state.mode === 'backing';
+      const simPlaying = testAudio && !testAudio.paused;
+      $('btnSimulate').textContent = simPlaying ? 'Pause simulation' : 'Simulate main amp';
 
       $('btnLoadFolder').disabled = state.mode !== 'idle' && state.mode !== 'backing';
       const locked = state.mode === 'primed' || state.mode === 'armed' || state.mode === 'cutout';
@@ -471,6 +527,7 @@
 
     function selectTrack(id) {
       if (state.mode === 'primed' || state.mode === 'armed' || state.mode === 'cutout') return;
+      if (id !== state.selectedId) stopSimulate(true);
       state.selectedId = id;
       renderTrackList();
     }
@@ -498,6 +555,7 @@
       }
 
       if (state.mode !== 'idle' && state.mode !== 'backing') await disarm(false);
+      stopSimulate(true);
       revokeTracks();
 
       state.tracks = audioFiles
@@ -551,86 +609,248 @@
       return Math.sqrt(sum / timeDomainBuf.length);
     }
 
-    function normalizeEnvelope(arr) {
-      let max = 0.0001;
+    function peakOf(arr) {
+      let max = 0;
       for (let i = 0; i < arr.length; i++) if (arr[i] > max) max = arr[i];
-      const out = new Float32Array(arr.length);
-      for (let i = 0; i < arr.length; i++) out[i] = arr[i] / max;
+      return max;
+    }
+
+    function resample(arr, n) {
+      const out = new Float32Array(n);
+      if (!arr.length) return out;
+      if (arr.length === 1) {
+        out.fill(arr[0]);
+        return out;
+      }
+      for (let i = 0; i < n; i++) {
+        const t = i * (arr.length - 1) / (n - 1);
+        const j = Math.floor(t);
+        const f = t - j;
+        const a = arr[j];
+        const b = arr[Math.min(j + 1, arr.length - 1)];
+        out[i] = a + (b - a) * f;
+      }
       return out;
     }
 
-    function correlateAtPosition(micEnv, fileEnv, centerSec) {
-      if (!micEnv.length || !fileEnv.length) return { position: centerSec, score: 0 };
-
-      const micNorm = normalizeEnvelope(micEnv);
-      const micLen = micNorm.length;
-      const maxStart = fileEnv.length - micLen;
-      if (maxStart <= 0) return { position: 0, score: 0 };
-
-      let bestIdx = 0;
-      let bestScore = -Infinity;
-      const searchStart = Math.max(0, Math.floor(centerSec * ENVELOPE_RATE) - ENVELOPE_RATE * 8);
-      const searchEnd = Math.min(maxStart, Math.floor(centerSec * ENVELOPE_RATE) + ENVELOPE_RATE * 12);
-
-      for (let i = searchStart; i <= searchEnd; i++) {
-        let dot = 0;
-        let micMag = 0;
-        let fileMag = 0;
-        for (let j = 0; j < micLen; j++) {
-          const m = micNorm[j];
-          const f = fileEnv[i + j];
-          dot += m * f;
-          micMag += m * m;
-          fileMag += f * f;
-        }
-        const denom = Math.sqrt(micMag * fileMag) || 1;
-        const score = dot / denom;
-        if (score > bestScore) {
-          bestScore = score;
-          bestIdx = i;
-        }
+    function pearson(a, b) {
+      const n = Math.min(a.length, b.length);
+      if (n < 3) return 0;
+      let ma = 0, mb = 0;
+      for (let i = 0; i < n; i++) { ma += a[i]; mb += b[i]; }
+      ma /= n; mb /= n;
+      let num = 0, da = 0, db = 0;
+      for (let i = 0; i < n; i++) {
+        const x = a[i] - ma;
+        const y = b[i] - mb;
+        num += x * y;
+        da += x * x;
+        db += y * y;
       }
-
-      return { position: bestIdx / ENVELOPE_RATE, score: bestScore };
+      if (da < 1e-12 || db < 1e-12) return 0;
+      return num / Math.sqrt(da * db);
     }
 
-    function matchStartFingerprint(micEnv, startFp) {
-      if (!micEnv.length || !startFp.length) return { position: 0, score: 0 };
-
-      const micNorm = normalizeEnvelope(micEnv);
-      const micLen = micNorm.length;
-      const maxStart = startFp.length - micLen;
-      if (maxStart < 0) return { position: 0, score: 0 };
-
-      let bestIdx = 0;
-      let bestScore = -Infinity;
-
-      for (let i = 0; i <= maxStart; i++) {
-        let dot = 0;
-        let micMag = 0;
-        let fileMag = 0;
-        for (let j = 0; j < micLen; j++) {
-          const m = micNorm[j];
-          const f = startFp[i + j];
-          dot += m * f;
-          micMag += m * m;
-          fileMag += f * f;
+    function extractBursts(env, threshold, startIdx, endIdx) {
+      const bursts = [];
+      const enter = threshold;
+      const leave = threshold * 0.65;
+      let i = startIdx || 0;
+      const last = endIdx == null ? env.length : endIdx;
+      while (i < last) {
+        if (env[i] <= enter) { i++; continue; }
+        const start = i;
+        const samples = [];
+        let sum = 0, peak = 0;
+        let speaking = true;
+        while (i < last && speaking) {
+          const v = env[i];
+          samples.push(v);
+          sum += v;
+          if (v > peak) peak = v;
+          i++;
+          if (i < last && env[i] <= leave) speaking = false;
         }
-        const denom = Math.sqrt(micMag * fileMag) || 1;
-        const score = dot / denom;
-        if (score > bestScore) {
-          bestScore = score;
-          bestIdx = i;
+        const dur = samples.length / ENVELOPE_RATE;
+        if (dur >= MIN_BURST_SEC) {
+          bursts.push({
+            start: start / ENVELOPE_RATE,
+            end: (start + samples.length) / ENVELOPE_RATE,
+            dur,
+            mean: sum / samples.length,
+            peak,
+            samples
+          });
         }
       }
-
-      return { position: bestIdx / ENVELOPE_RATE, score: bestScore };
+      return mergeCloseBursts(bursts);
     }
 
-    function pushMicSample(rms) {
-      micEnvelopeRing.push(rms);
-      const maxLen = Math.ceil(MIC_WINDOW_SEC * ENVELOPE_RATE);
-      if (micEnvelopeRing.length > maxLen) micEnvelopeRing.shift();
+    function mergeCloseBursts(bursts, maxGapSec) {
+      const gap = maxGapSec == null ? 0.18 : maxGapSec;
+      if (bursts.length < 2) return bursts;
+      const out = [bursts[0]];
+      for (let i = 1; i < bursts.length; i++) {
+        const prev = out[out.length - 1];
+        const cur = bursts[i];
+        if (cur.start - prev.end <= gap) {
+          prev.samples = prev.samples.concat(cur.samples);
+          prev.end = cur.end;
+          prev.dur = prev.end - prev.start;
+          let sum = 0, peak = prev.peak;
+          for (let j = 0; j < prev.samples.length; j++) {
+            sum += prev.samples[j];
+            if (prev.samples[j] > peak) peak = prev.samples[j];
+          }
+          prev.mean = sum / prev.samples.length;
+          prev.peak = peak;
+        } else {
+          out.push(cur);
+        }
+      }
+      return out;
+    }
+
+    function finishBurst(burst) {
+      if (!burst) return null;
+      burst.dur = burst.samples.length / ENVELOPE_RATE;
+      burst.end = burst.start + burst.dur;
+      burst.mean = burst.samples.length ? burst.sum / burst.samples.length : 0;
+      if (burst.dur < MIN_BURST_SEC) return null;
+      return burst;
+    }
+
+    function currentMicBursts() {
+      const list = completedMicBursts.slice();
+      if (liveBurst && liveBurst.samples.length / ENVELOPE_RATE >= MIN_BURST_SEC) {
+        const live = finishBurst({
+          start: liveBurst.start,
+          samples: liveBurst.samples.slice(),
+          sum: liveBurst.sum,
+          peak: liveBurst.peak
+        });
+        if (live) list.push(live);
+      }
+      return mergeCloseBursts(list).slice(-MAX_MATCH_BURSTS);
+    }
+
+    function relativeMeans(bursts) {
+      let max = 0.0001;
+      for (let i = 0; i < bursts.length; i++) if (bursts[i].mean > max) max = bursts[i].mean;
+      return bursts.map(b => b.mean / max);
+    }
+
+    function pairBurstScore(micB, fileB) {
+      const durScore = 1 - Math.min(1, Math.abs(micB.dur - fileB.dur) / Math.max(micB.dur, fileB.dur, 0.12));
+      let shapeScore = 0;
+      if (micB.samples.length >= 4 && fileB.samples.length >= 4) {
+        shapeScore = pearson(resample(micB.samples, SHAPE_POINTS), resample(fileB.samples, SHAPE_POINTS));
+        shapeScore = Math.max(0, shapeScore);
+      }
+      return 0.55 * durScore + 0.45 * shapeScore;
+    }
+
+    function burstSequenceScore(micBursts, fileBursts) {
+      const n = micBursts.length;
+      if (!n || n !== fileBursts.length) return 0;
+      let pairSum = 0;
+      for (let i = 0; i < n; i++) pairSum += pairBurstScore(micBursts[i], fileBursts[i]);
+      let pairScore = pairSum / n;
+      if (n >= 2) {
+        const riM = relativeMeans(micBursts);
+        const riF = relativeMeans(fileBursts);
+        let dot = 0, m = 0, f = 0;
+        for (let i = 0; i < n; i++) {
+          dot += riM[i] * riF[i];
+          m += riM[i] * riM[i];
+          f += riF[i] * riF[i];
+        }
+        const intScore = dot / (Math.sqrt(m * f) || 1);
+        pairScore = 0.7 * pairScore + 0.3 * intScore;
+      } else {
+        pairScore *= 0.82;
+      }
+      return pairScore;
+    }
+
+    function matchBurstSequence(micBursts, fileBurstList) {
+      if (!micBursts.length) return { position: 0, score: 0, gated: true, count: 0 };
+      if (!fileBurstList.length) return { position: 0, score: 0, gated: false, count: micBursts.length };
+      const n = micBursts.length;
+      if (fileBurstList.length < n) return { position: 0, score: 0, gated: false, count: n };
+
+      let bestScore = 0;
+      let bestPos = 0;
+      for (let i = 0; i <= fileBurstList.length - n; i++) {
+        const slice = fileBurstList.slice(i, i + n);
+        const score = burstSequenceScore(micBursts, slice);
+        if (score > bestScore) {
+          bestScore = score;
+          const lastF = slice[n - 1];
+          const lastM = micBursts[n - 1];
+          bestPos = lastF.start + Math.min(lastM.dur, lastF.dur);
+        }
+      }
+      return { position: bestPos, score: bestScore, gated: false, count: n };
+    }
+
+    function speechSeconds(bursts) {
+      let s = 0;
+      for (let i = 0; i < bursts.length; i++) s += bursts[i].dur;
+      return s;
+    }
+
+    function fileExpectsSpeechAt(sec) {
+      if (!fileBursts.length) return false;
+      const t0 = sec;
+      const t1 = sec + FILE_LOOKAHEAD_SEC;
+      for (let i = 0; i < fileBursts.length; i++) {
+        const b = fileBursts[i];
+        if (b.end > t0 && b.start < t1) return true;
+      }
+      return false;
+    }
+
+    function nearbyFileBursts(centerSec) {
+      return fileBursts.filter(b =>
+        b.end > centerSec - DRIFT_SEARCH_SEC && b.start < centerSec + DRIFT_SEARCH_SEC
+      );
+    }
+
+    function noteMicEnergy(rms) {
+      const enter = state.settings.silenceThreshold;
+      const leave = enter * 0.65;
+      if (!liveBurst) {
+        if (rms > enter) {
+          liveBurst = { start: performance.now() / 1000, samples: [rms], sum: rms, peak: rms };
+        }
+        return false;
+      }
+      if (rms > leave) {
+        liveBurst.samples.push(rms);
+        liveBurst.sum += rms;
+        if (rms > liveBurst.peak) liveBurst.peak = rms;
+        return false;
+      }
+      const done = finishBurst(liveBurst);
+      liveBurst = null;
+      if (done) {
+        completedMicBursts.push(done);
+        completedMicBursts = mergeCloseBursts(completedMicBursts);
+        if (completedMicBursts.length > 24) completedMicBursts.shift();
+        return true;
+      }
+      return false;
+    }
+
+    function liveFilePosition() {
+      if (backupAudio && !backupAudio.paused && !backupAudio.ended) {
+        return backupAudio.currentTime + state.settings.bufferDelayMs / 1000;
+      }
+      if (state.mode === 'armed' || state.mode === 'cutout') {
+        return armPositionAt + (Date.now() - armClockAt) / 1000;
+      }
+      return trackedPosition;
     }
 
     function updateProgressDisplay() {
@@ -643,7 +863,7 @@
     function syncBackupPlayer() {
       if (!backupAudio || state.mode === 'cutout') return;
       const target = Math.max(0, trackedPosition - state.settings.bufferDelayMs / 1000);
-      if (Math.abs(backupAudio.currentTime - target) > 0.4) {
+      if (Math.abs(backupAudio.currentTime - target) > 0.45) {
         backupAudio.currentTime = target;
       }
       if (backupAudio.paused && state.mode === 'armed') {
@@ -651,38 +871,58 @@
       }
     }
 
-    function tickPrimed() {
+    function tickListen() {
       const rms = rmsFromAnalyser();
-      pushMicSample(rms);
+      const pct = Math.min(100, (rms / 0.15) * 100);
+      $('micMeterFill').style.width = pct + '%';
 
+      const burstEnded = noteMicEnergy(rms);
       if (rms > state.settings.silenceThreshold) lastSpeechAt = Date.now();
+      if (state.analysing) return;
 
-      const minSamples = Math.ceil(PRIMED_MIC_SEC * ENVELOPE_RATE);
-      if (micEnvelopeRing.length >= minSamples && startFingerprint) {
-        const match = matchStartFingerprint(micEnvelopeRing, startFingerprint);
-        lastMatchScore = match.score;
-        updateUI();
-
-        if (match.score >= state.settings.matchThreshold && rms > state.settings.silenceThreshold) {
-          matchStreak++;
-          if (matchStreak >= MATCH_CONFIRM_TICKS) {
-            activateSync(match.position);
-            return;
-          }
-        } else {
-          matchStreak = 0;
-        }
-      }
+      if (state.mode === 'primed') tickPrimed(rms);
+      else if (state.mode === 'armed') tickArmed(rms, burstEnded);
 
       updateProgressDisplay();
     }
 
+    function tickPrimed(rms) {
+      const micBursts = currentMicBursts();
+      if (!micBursts.length || !startBursts.length) {
+        lastMatchGated = true;
+        lastMatchScore = 0;
+        lastMatchBurstCount = 0;
+        matchStreak = 0;
+        updateUI();
+        return;
+      }
+
+      const match = matchBurstSequence(micBursts, startBursts);
+      lastMatchGated = match.gated;
+      lastMatchScore = match.score;
+      lastMatchBurstCount = match.count;
+      updateUI();
+
+      const enoughSpeech = speechSeconds(micBursts) >= MIN_LOCK_SPEECH_SEC;
+      const hearing = rms > state.settings.silenceThreshold || !!liveBurst;
+      if (!match.gated && enoughSpeech && hearing && match.score >= state.settings.matchThreshold) {
+        matchStreak++;
+        if (matchStreak >= MATCH_CONFIRM_TICKS) {
+          activateSync(match.position);
+        }
+      } else {
+        matchStreak = 0;
+      }
+    }
+
     async function activateSync(startSec) {
       trackedPosition = startSec;
-      smoothedPosition = startSec;
+      armPositionAt = startSec;
+      armClockAt = Date.now();
       lastSpeechAt = Date.now();
       silenceSince = null;
       matchStreak = 0;
+      inLogicalSync = true;
 
       if (backupAudio) {
         const target = Math.max(0, startSec - state.settings.bufferDelayMs / 1000);
@@ -691,54 +931,55 @@
         await backupAudio.play().catch(() => {});
       }
 
-      if (trackTimer) clearInterval(trackTimer);
-      trackTimer = setInterval(tickTrack, TRACK_INTERVAL_MS);
-
       setMode('armed');
     }
 
-    function tickTrack() {
-      const rms = rmsFromAnalyser();
-      pushMicSample(rms);
+    function tickArmed(rms, burstEnded) {
+      trackedPosition = liveFilePosition();
+      fileExpectsSpeech = fileExpectsSpeechAt(trackedPosition);
+      const heardSpeech = rms > state.settings.silenceThreshold || !!liveBurst;
 
-      if (rms > state.settings.silenceThreshold) {
+      if (heardSpeech) {
         lastSpeechAt = Date.now();
         silenceSince = null;
-      } else if (state.mode === 'armed') {
+        inLogicalSync = true;
+      } else if (fileExpectsSpeech) {
         if (!silenceSince) silenceSince = Date.now();
+      } else {
+        silenceSince = null;
       }
 
-      if (micEnvelopeRing.length >= ENVELOPE_RATE) {
-        const result = correlateAtPosition(micEnvelopeRing, fileEnvelope, smoothedPosition);
-        if (result.score >= 0.25) {
-          smoothedPosition = smoothedPosition * (1 - EMA_ALPHA) + result.position * EMA_ALPHA;
-          trackedPosition = smoothedPosition;
+      if (burstEnded && heardSpeech) {
+        const micBursts = currentMicBursts().slice(-3);
+        if (micBursts.length) {
+          const match = matchBurstSequence(micBursts, nearbyFileBursts(trackedPosition));
+          if (!match.gated && match.score >= Math.max(0.5, state.settings.matchThreshold)) {
+            trackedPosition = match.position;
+            armPositionAt = trackedPosition;
+            armClockAt = Date.now();
+            inLogicalSync = true;
+          }
         }
       }
 
-      if (state.mode === 'armed') {
-        syncBackupPlayer();
-        checkCutout(rms);
-      }
-
-      updateProgressDisplay();
+      syncBackupPlayer();
+      checkCutout();
+      updateUI();
     }
 
-    function checkCutout(rms) {
+    function checkCutout() {
       if (!silenceSince) return;
+      if (!fileExpectsSpeech) {
+        silenceSince = null;
+        return;
+      }
       const silentFor = Date.now() - silenceSince;
       if (silentFor < state.settings.silenceDurationMs) return;
-      if (Date.now() - lastSpeechAt > SPEECH_RECENT_MS) return;
       if (fileDuration && trackedPosition / fileDuration > FILE_END_THRESHOLD) return;
 
       if (backupAudio) backupAudio.pause();
+      inLogicalSync = false;
       setMode('cutout');
-    }
-
-    function tickMeter() {
-      const rms = rmsFromAnalyser();
-      const pct = Math.min(100, (rms / 0.15) * 100);
-      $('micMeterFill').style.width = pct + '%';
     }
 
     async function requestWakeLock() {
@@ -762,23 +1003,39 @@
 
       try {
         ensureAudioCtx();
-        micStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false }, video: false });
+        lastMatchGated = true;
+        lastMatchScore = 0;
+        lastMatchBurstCount = 0;
+        completedMicBursts = [];
+        liveBurst = null;
+        fileBursts = [];
+        startBursts = [];
+        state.analysing = true;
+        setMode('primed');
+
+        micStream = await navigator.mediaDevices.getUserMedia({
+          audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+          video: false
+        });
         micSource = audioCtx.createMediaStreamSource(micStream);
         analyser = audioCtx.createAnalyser();
         analyser.fftSize = 2048;
         micSource.connect(analyser);
         timeDomainBuf = new Float32Array(analyser.fftSize);
 
+        if (listenTimer) clearInterval(listenTimer);
+        listenTimer = setInterval(tickListen, LISTEN_MS);
+        await requestWakeLock();
+
         const arrayBuf = await track.file.arrayBuffer();
         fileBuffer = await audioCtx.decodeAudioData(arrayBuf.slice(0));
         fileDuration = fileBuffer.duration;
-        const rawEnvelope = computeEnvelope(fileBuffer, ENVELOPE_RATE);
-        fileEnvelope = normalizeEnvelope(rawEnvelope);
-        const fpLen = Math.min(
-          Math.ceil(state.settings.fingerprintSec * ENVELOPE_RATE),
-          rawEnvelope.length
-        );
-        startFingerprint = normalizeEnvelope(rawEnvelope.subarray(0, fpLen));
+        fileEnvelope = computeEnvelope(fileBuffer, ENVELOPE_RATE);
+        const peak = peakOf(fileEnvelope) || 0.001;
+        fileSpeechThreshold = Math.max(peak * 0.08, 0.008);
+        fileBursts = extractBursts(fileEnvelope, fileSpeechThreshold);
+        const fpEnd = Math.min(fileEnvelope.length, Math.ceil(state.settings.fingerprintSec * ENVELOPE_RATE));
+        startBursts = extractBursts(fileEnvelope, fileSpeechThreshold, 0, fpEnd);
         track.duration = fileDuration;
 
         backupAudio = new Audio(track.url);
@@ -787,20 +1044,15 @@
         backupAudio.playbackRate = 1;
 
         trackedPosition = 0;
-        smoothedPosition = 0;
         lastSpeechAt = Date.now();
         silenceSince = null;
-        micEnvelopeRing = [];
         matchStreak = 0;
-        lastMatchScore = 0;
+        inLogicalSync = false;
+        fileExpectsSpeech = false;
 
-        await requestWakeLock();
-
-        trackTimer = setInterval(tickPrimed, TRACK_INTERVAL_MS);
-        meterTimer = setInterval(tickMeter, 80);
-
-        setMode('primed');
+        state.analysing = false;
         renderTrackList();
+        updateUI();
       } catch (err) {
         console.error(err);
         await disarm(false);
@@ -811,8 +1063,7 @@
     }
 
     async function disarm(resetProgress) {
-      if (trackTimer) { clearInterval(trackTimer); trackTimer = null; }
-      if (meterTimer) { clearInterval(meterTimer); meterTimer = null; }
+      if (listenTimer) { clearInterval(listenTimer); listenTimer = null; }
 
       if (backupAudio) {
         backupAudio.pause();
@@ -829,19 +1080,23 @@
       timeDomainBuf = null;
       fileBuffer = null;
       fileEnvelope = null;
-      startFingerprint = null;
+      fileBursts = [];
+      startBursts = [];
+      liveBurst = null;
+      completedMicBursts = [];
+      state.analysing = false;
 
       releaseWakeLock();
 
-      if (resetProgress !== false) {
-        trackedPosition = 0;
-        smoothedPosition = 0;
-      }
+      if (resetProgress !== false) trackedPosition = 0;
 
-      micEnvelopeRing = [];
       silenceSince = null;
       matchStreak = 0;
       lastMatchScore = 0;
+      lastMatchGated = true;
+      lastMatchBurstCount = 0;
+      inLogicalSync = false;
+      fileExpectsSpeech = false;
       setMode('idle');
       updateProgressDisplay();
     }
@@ -853,8 +1108,7 @@
       await backupAudio.play();
       setMode('backing');
 
-      if (trackTimer) { clearInterval(trackTimer); trackTimer = null; }
-      if (meterTimer) { clearInterval(meterTimer); meterTimer = null; }
+      if (listenTimer) { clearInterval(listenTimer); listenTimer = null; }
 
       backupAudio.onended = () => {
         disarm(true);
@@ -871,17 +1125,49 @@
     function dismissCutout() {
       silenceSince = null;
       lastSpeechAt = Date.now();
+      inLogicalSync = true;
+      armPositionAt = trackedPosition;
+      armClockAt = Date.now();
       if (backupAudio) {
         backupAudio.volume = 0;
         backupAudio.play().catch(() => {});
       }
       setMode('armed');
-      if (!trackTimer) trackTimer = setInterval(tickTrack, TRACK_INTERVAL_MS);
-      if (!meterTimer) meterTimer = setInterval(tickMeter, 80);
+      if (!listenTimer) listenTimer = setInterval(tickListen, LISTEN_MS);
+    }
+
+    function stopSimulate(resetSrc) {
+      if (!testAudio) return;
+      testAudio.pause();
+      if (resetSrc) {
+        testAudio.src = '';
+        testAudio = null;
+      }
+      updateUI();
+    }
+
+    function toggleSimulate() {
+      const track = selectedTrack();
+      if (!track) return;
+      if (!testAudio || testAudio._trackId !== track.id) {
+        stopSimulate(true);
+        testAudio = new Audio(track.url);
+        testAudio._trackId = track.id;
+        testAudio.volume = 0.85;
+        testAudio.addEventListener('ended', () => updateUI());
+        testAudio.addEventListener('pause', () => updateUI());
+        testAudio.addEventListener('play', () => updateUI());
+      }
+      if (testAudio.paused) testAudio.play().catch(err => {
+        alert('Could not play simulation: ' + (err.message || err));
+      });
+      else testAudio.pause();
+      updateUI();
     }
 
     $('btnLoadFolder').addEventListener('click', () => $('folderInput').click());
     $('folderInput').addEventListener('change', handleFolderPick);
+    $('btnSimulate').addEventListener('click', toggleSimulate);
 
     $('btnMain').addEventListener('click', async () => {
       if (state.mode === 'idle') await prime();
@@ -901,7 +1187,7 @@
 
     $('bufferDelay').addEventListener('input', e => {
       state.settings.bufferDelayMs = +e.target.value;
-      $('bufferDelayVal').textContent = (state.settings.bufferDelayMs / 1000).toFixed(1) + ' s';
+      $('bufferDelayVal').textContent = fmtSettingMs(state.settings.bufferDelayMs);
     });
     $('silenceThreshold').addEventListener('input', e => {
       state.settings.silenceThreshold = +e.target.value;
@@ -909,7 +1195,7 @@
     });
     $('silenceDuration').addEventListener('input', e => {
       state.settings.silenceDurationMs = +e.target.value;
-      $('silenceDurationVal').textContent = state.settings.silenceDurationMs + ' ms';
+      $('silenceDurationVal').textContent = fmtSettingMs(state.settings.silenceDurationMs);
     });
     $('fingerprintSec').addEventListener('input', e => {
       state.settings.fingerprintSec = +e.target.value;
