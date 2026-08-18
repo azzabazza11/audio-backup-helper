@@ -3616,6 +3616,7 @@
     }
 
     function checkCutout() {
+      if (!trackingLocked) return;
       if (cutoutVerifyPending) return;
       if (Date.now() < cutoutCooldownUntil) return;
       if (!fileExpectsSpeech) return;
