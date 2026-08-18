@@ -45,6 +45,8 @@
       color: var(--ink);
       font-family: "Outfit", system-ui, sans-serif;
       font-weight: 450;
+      -webkit-user-select: none;
+      user-select: none;
     }
     body {
       padding:
@@ -53,8 +55,12 @@
         calc(var(--bar-h) + 16px + var(--safe-b))
         calc(16px + var(--safe-l));
     }
-    button, input, select { font: inherit; color: inherit; }
+    button, input, select, textarea { font: inherit; color: inherit; }
     button { cursor: pointer; border: 0; background: none; }
+    input, select, textarea, .trigger-log, .sync-line {
+      -webkit-user-select: text;
+      user-select: text;
+    }
     .mono { font-family: "IBM Plex Mono", ui-monospace, monospace; }
 
     .topbar {
@@ -602,10 +608,10 @@
     <button type="button" class="btn" id="btnForgetFingerprints" style="width:100%;margin-top:8px">Clear stored fingerprints</button>
   </details>
 
-  <p class="ver mono" id="appVer">v1.5.4</p>
+  <p class="ver mono" id="appVer">v1.5.5</p>
 
   <div class="bottom-bar">
-    <p class="bottom-hint" id="mainBtnHint">Tap — start track now · Hold — auto lock-on</p>
+    <p class="bottom-hint" id="mainBtnHint">Tap — manual tracking · Hold — auto lock-on</p>
     <button type="button" class="btn primary" id="btnMain" disabled>Back me up</button>
   </div>
 
@@ -620,7 +626,7 @@
 
   <script>
     const $ = id => document.getElementById(id);
-    const APP_VER = '1.5.4';
+    const APP_VER = '1.5.5';
 
     const ENVELOPE_RATE = 20;
     const TRAIL_STEP_MS = 500;
@@ -780,6 +786,11 @@
     let showDebug = false;
     let settingsLocked = false;
     let armKind = null;
+    let manualStartedAt = 0;
+    let manualBaseSec = 0;
+    let manualTemplate = null;
+    let manualWinStart = -1;
+    let manualWinDur = 0;
     let mainLongPress = false;
     let mainPressTimer = null;
     const fpInflight = new Map();
@@ -1271,6 +1282,11 @@
       return state.settings.bufferDelayMs;
     }
 
+    function manualClockSec() {
+      if (!manualStartedAt) return manualBaseSec || 0;
+      return Math.max(0, manualBaseSec + (Date.now() - manualStartedAt) / 1000);
+    }
+
     function updateTrailUi() {
       const row = $('trailRow');
       const val = $('trailVal');
@@ -1386,17 +1402,22 @@
       if (state.mode === 'manual') {
         const trailSec = effectiveTrailMs() / 1000;
         if (!trackingLocked) {
-          if (clipCollecting) return 'Playing · recording clip to match the file…';
+          if (clipCollecting) return 'Tracking · recording clip near the expected file time…';
           if (confirmStartedAt) {
-            return 'Playing · matching ' + (confirmHeldMs / 1000).toFixed(1) + ' / ' +
+            return 'Tracking · matching ' + (confirmHeldMs / 1000).toFixed(1) + ' / ' +
               (state.settings.confirmHoldMs / 1000).toFixed(1) + ' s · trail preset ' +
               trailSec.toFixed(1) + ' s';
           }
-          if (lastClipStatus === 'miss') return 'Playing · last clip missed · trail preset ' + trailSec.toFixed(1) + ' s';
-          return 'Playing · listening for a match · trail preset ' + trailSec.toFixed(1) + ' s';
+          if (lastClipStatus === 'miss') return 'Tracking · last clip missed · trail preset ' + trailSec.toFixed(1) + ' s';
+          return 'Tracking · listening for local match · trail preset ' + trailSec.toFixed(1) + ' s';
         }
-        let line = 'Playing · locked · trail ' + trailSec.toFixed(1) + ' s';
+        let line = 'Tracking · trail measured ' + trailSec.toFixed(1) + ' s';
         if (lastSpotStatus) line += ' · ' + lastSpotStatus;
+        if (!fileExpectsSpeech) return line + ' · file pause';
+        if (unexpectedSilenceMs > 0) {
+          return line + ' · quiet ' + (unexpectedSilenceMs / 1000).toFixed(1) + ' / ' +
+            (state.settings.silenceDurationMs / 1000).toFixed(1) + ' s';
+        }
         return line;
       }
       return '';
@@ -1441,7 +1462,7 @@
 
       let pos = trackedPosition;
       if (state.mode === 'backing' && backupAudio) pos = backupAudio.currentTime;
-      else if (state.mode === 'manual' && backupAudio) pos = backupAudio.currentTime;
+      else if (state.mode === 'manual') pos = backupPosition();
       else if (state.mode === 'seeking') pos = seekWindow().center;
       else if (state.mode === 'primed' && confirmStartedAt) pos = lastClipOffset;
       $('timeCurrent').textContent = fmtTime(pos);
@@ -1476,24 +1497,24 @@
         btn.className = 'btn primary';
         btn.disabled = !hasSelection;
       } else if (state.mode === 'manual') {
-        pill.classList.add('playing');
+        pill.classList.add('listening');
         if (state.analysing) {
-          $('statusText').textContent = 'Starting track…';
+          $('statusText').textContent = 'Starting manual tracking…';
         } else if (clipCollecting) {
-          $('statusText').textContent = 'Playing · recording clip';
-        } else if (trackingLocked) {
-          $('statusText').textContent = 'Playing · locked on amp';
+          $('statusText').textContent = 'Tracking · recording clip';
         } else if (confirmStartedAt) {
           const held = (confirmHeldMs / 1000).toFixed(1);
           const need = (state.settings.confirmHoldMs / 1000).toFixed(1);
-          $('statusText').textContent = 'Playing · matching ' + held + ' / ' + need + ' s';
+          $('statusText').textContent = 'Tracking · matching ' + held + ' / ' + need + ' s';
+        } else if (trackingLocked) {
+          $('statusText').textContent = 'Tracking · trail measured';
         } else if (lastClipStatus === 'miss') {
-          $('statusText').textContent = 'Playing · clip missed';
+          $('statusText').textContent = 'Tracking · clip missed';
         } else {
-          $('statusText').textContent = 'Playing · listening for match';
+          $('statusText').textContent = 'Tracking · listening for match';
         }
         btn.textContent = 'Stop';
-        btn.className = 'btn danger';
+        btn.className = 'btn';
         btn.disabled = false;
       } else if (state.mode === 'primed') {
         pill.classList.add('waiting');
@@ -2253,7 +2274,7 @@
         if (state.mode === 'cutout') v.textContent = 'Lost — mic quiet where the file still has speech';
         else if (state.mode === 'backing') v.textContent = 'Playing backup';
         else if (state.mode === 'manual') {
-          v.textContent = trackingLocked ? 'Playing · locked on amp' : 'Playing · matching in background';
+          v.textContent = trackingLocked ? 'Tracking with measured trail' : 'Tracking with user-started clock';
         } else if (state.mode === 'armed') v.textContent = trackingLocked ? 'Locked on the amp' : 'Listening';
         else if (state.mode === 'seeking') {
           v.textContent = confirmStartedAt ? 'Amp heard — confirming lock' : 'Watching for the amp';
@@ -2541,6 +2562,7 @@
           if (wasCutoutVerify) applyCutoutVerifyMatch(samples, sr, spotStart, need / sr * 1000);
           else if (wasSpot) applySpotMatch(samples, sr, spotStart, need / sr * 1000);
           else if (state.mode === 'seeking') applySeekMatch(samples, sr, need / sr * 1000);
+          else if (state.mode === 'manual') applyManualMatch(samples, sr, need / sr * 1000);
           else {
             const result = matchClipToTemplate(samples, sr, templateIndex);
             result.offsetSec = templateOriginSec() + result.offsetSec;
@@ -2627,7 +2649,8 @@
         pushClipLog({
           kind: 'miss',
           at: Date.now(),
-          line: (state.mode === 'seeking' ? 'SEEK MISS ' : 'MISS ') + base + ' · ' + lastClipFail
+          line: (state.mode === 'seeking' ? 'SEEK MISS ' : state.mode === 'manual' ? 'MAN MISS ' : 'MISS ') +
+            base + ' · ' + lastClipFail
         });
         if (confirmStartedAt) {
           if (!confirmBadSince) confirmBadSince = now;
@@ -2659,6 +2682,45 @@
       return seekTemplate;
     }
 
+    function manualMatchWindow() {
+      const center = roomPosition();
+      const lo = Math.max(0, center - SEEK_RADIUS_SEC);
+      const hiRaw = center + SEEK_RADIUS_SEC;
+      const cap = fileDuration || hiRaw;
+      const hi = Math.min(cap, lo + SEEK_WINDOW_MAX, hiRaw);
+      return { start: lo, dur: Math.max(8, hi - lo), center };
+    }
+
+    function refreshManualTemplate() {
+      if (!fileBuffer) return null;
+      const win = manualMatchWindow();
+      if (manualTemplate && Math.abs(win.start - manualWinStart) < 2 && Math.abs(win.dur - manualWinDur) < 4) {
+        return manualTemplate;
+      }
+      manualTemplate = buildTemplateIndex(fileBuffer, win.dur, win.start);
+      manualWinStart = win.start;
+      manualWinDur = win.dur;
+      return manualTemplate;
+    }
+
+    function applyManualMatch(samples, sampleRate, clipMs) {
+      const local = refreshManualTemplate();
+      if (!local || !local.hashCount) {
+        lastClipStatus = 'miss';
+        lastClipFail = 'no local fingerprint window';
+        pushClipLog({ kind: 'miss', at: Date.now(), line: 'MAN MISS no local fingerprint' });
+        updateUI();
+        return;
+      }
+      const result = matchClipToTemplate(samples, sampleRate, local);
+      result.offsetSec = (local.originSec || 0) + result.offsetSec;
+      clipEnv = envelopeFromPcm(samples, sampleRate);
+      clipEnvFileAt = result.offsetSec;
+      const pattern = scoreSilencePattern(samples, sampleRate, result.offsetSec);
+      Object.assign(result, pattern);
+      applyClipMatch(result, clipMs);
+    }
+
     function applySeekMatch(samples, sampleRate, clipMs) {
       const local = refreshSeekTemplate();
       if (!local || !local.hashCount) {
@@ -2679,7 +2741,7 @@
 
     function applySpotMatch(samples, sampleRate, fileStart, clipMs) {
       nextSpotAt = Date.now() + SPOT_WAIT_MS;
-      if (state.mode !== 'armed' || !fileBuffer) {
+      if ((state.mode !== 'armed' && state.mode !== 'manual') || !fileBuffer) {
         lastSpotStatus = 'spot skipped';
         pushClipLog({ kind: 'spot', at: Date.now(), line: 'SPOT skipped (no file buffer)' });
         updateUI();
@@ -2730,6 +2792,9 @@
       seekTemplate = null;
       seekWinStart = -1;
       seekWinDur = 0;
+      manualTemplate = null;
+      manualWinStart = -1;
+      manualWinDur = 0;
       trackingLocked = false;
       resetConfirmHold();
       resetCutoutState();
@@ -3309,8 +3374,8 @@
       if (state.mode === 'backing' && backupAudio) {
         return backupAudio.currentTime;
       }
-      if (state.mode === 'manual' && !trackingLocked && backupAudio) {
-        return backupAudio.currentTime;
+      if (state.mode === 'manual') {
+        return manualClockSec() + effectiveTrailMs() / 1000;
       }
       if (backupAudio && trackingLocked && !backupAudio.ended && !backupAudio.paused &&
           armKind !== 'manual' && state.mode !== 'manual') {
@@ -3323,6 +3388,7 @@
     }
 
     function backupPosition() {
+      if (state.mode === 'manual' && state.mode !== 'backing') return manualClockSec();
       if (backupAudio && trackingLocked) return backupAudio.currentTime;
       return Math.max(0, roomPosition() - lockedBufferMs / 1000);
     }
@@ -3379,12 +3445,15 @@
         tickPrimedViz();
       } else if (state.mode === 'manual') {
         beginClipIfNeeded(rms);
-        if (trackingLocked) {
-          maybeSpotCheck(rms);
-          const room = roomPosition();
-          trackedPosition = Math.max(0, room - lockedBufferMs / 1000);
-          fileExpectsSpeech = fileExpectsSpeechAt(room);
-        }
+        const room = roomPosition();
+        trackedPosition = backupPosition();
+        fileExpectsSpeech = fileExpectsSpeechAt(room);
+        const heardSpeech = rms > state.settings.silenceThreshold || !!liveBurst;
+        if (heardSpeech) lastSpeechAt = Date.now();
+        noteUnexpectedSilence(fileExpectsSpeech, heardSpeech);
+        if (heardSpeech && unexpectedSilenceMs === 0) inLogicalSync = true;
+        if (trackingLocked) maybeSpotCheck(rms);
+        checkCutout();
         tickPrimedViz();
       } else if (state.mode === 'seeking') {
         beginClipIfNeeded(rms);
@@ -3405,7 +3474,7 @@
       const roomNow = fingerprintSec + confirmMs / 1000;
 
       if (armKind === 'manual') {
-        const backupNow = backupAudio ? backupAudio.currentTime : 0;
+        const backupNow = manualClockSec();
         const computedTrail = Math.round(Math.max(500, Math.min(30000, (roomNow - backupNow) * 1000)));
         lockedBufferMs = computedTrail;
         state.settings.bufferDelayMs = computedTrail;
@@ -3428,10 +3497,6 @@
         if (pendingPlayTimer) {
           clearTimeout(pendingPlayTimer);
           pendingPlayTimer = null;
-        }
-        if (backupAudio) {
-          backupAudio.volume = 1;
-          if (backupAudio.paused) await backupAudio.play().catch(() => {});
         }
         setMode('manual');
         updateUI();
@@ -3551,7 +3616,6 @@
     }
 
     function checkCutout() {
-      if (armKind === 'manual') return;
       if (cutoutVerifyPending) return;
       if (Date.now() < cutoutCooldownUntil) return;
       if (!fileExpectsSpeech) return;
@@ -3659,14 +3723,17 @@
         lockClockAt = 0;
         lockedBufferMs = 0;
         trackingLocked = false;
+        manualStartedAt = 0;
+        manualBaseSec = 0;
+        manualTemplate = null;
+        manualWinStart = -1;
+        manualWinDur = 0;
         if (pendingPlayTimer) { clearTimeout(pendingPlayTimer); pendingPlayTimer = null; }
 
         state.analysing = false;
         if (armKind === 'manual') {
-          backupAudio.volume = 1;
-          backupAudio.currentTime = 0;
-          await backupAudio.play().catch(() => {});
-          backupAudio.onended = () => disarm(true);
+          manualBaseSec = 0;
+          manualStartedAt = Date.now();
         }
         renderTrackList();
         updateUI();
@@ -3738,6 +3805,8 @@
       lockClockAt = 0;
       lockedBufferMs = 0;
       trackingLocked = false;
+      manualStartedAt = 0;
+      manualBaseSec = 0;
       armKind = null;
       setMode('idle');
       updateProgressDisplay();
@@ -3747,7 +3816,7 @@
       if (!backupAudio) return;
       if (pendingPlayTimer) { clearTimeout(pendingPlayTimer); pendingPlayTimer = null; }
       backupAudio.volume = 1;
-      backupAudio.currentTime = Math.max(0, roomPosition());
+      backupAudio.currentTime = Math.max(0, backupPosition());
       await backupAudio.play();
       setMode('backing');
 
@@ -3765,6 +3834,21 @@
     }
 
     function dismissCutout() {
+      if (armKind === 'manual') {
+        unexpectedSilenceMs = 0;
+        micSpeechStartedAt = null;
+        silenceSince = null;
+        lastSpeechAt = Date.now();
+        inLogicalSync = true;
+        cutoutVerifyPending = false;
+        cutoutVerifyStartedAt = 0;
+        cutoutCooldownUntil = Date.now() + CUTOUT_COOLDOWN_MS;
+        lastSpotStatus = 'manual tracking resumed';
+        setMode('manual');
+        if (!listenTimer) listenTimer = setInterval(tickListen, LISTEN_MS);
+        updateUI();
+        return;
+      }
       unexpectedSilenceMs = 0;
       micSpeechStartedAt = null;
       silenceSince = null;
@@ -3776,9 +3860,9 @@
       lastSpotStatus = 're-checking sync…';
       if (backupAudio) {
         backupAudio.volume = 0;
-        backupAudio.play().catch(() => {});
+        if (armKind !== 'manual') backupAudio.play().catch(() => {});
       }
-      setMode('armed');
+      setMode(armKind === 'manual' ? 'manual' : 'armed');
       if (!listenTimer) listenTimer = setInterval(tickListen, LISTEN_MS);
       updateUI();
     }
