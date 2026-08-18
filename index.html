@@ -650,6 +650,12 @@
     const CUTOUT_BLIP_MS = 1200;
     const CUTOUT_COOLDOWN_MS = 12000;
     const CUTOUT_FAIL_COOLDOWN_MS = 20000;
+    const STRONG_LOCK_SCORE = 0.98;
+    const STRONG_LOCK_COVERAGE = 0.55;
+    const STRONG_LOCK_MIN_MS = 6000;
+    const STRONG_LOCK_MAX_MS = 20000;
+    const STRONG_LOCK_DECAY_MS = 2500;
+    const STRONG_LOCK_SILENCE_MULT = 2.5;
     const HOLD_CONTINUE_RATIO = 0.7;
     const ALIGN_MATCH_FLOOR = 0.28;
     const SILENCE_MIN = 0.005;
@@ -723,6 +729,7 @@
     let lastMatchGated = true;
     let lastMatchBurstCount = 0;
     let lastMatchAlign = { pairs: [], skippedMic: [], skippedFile: [] };
+    let strongLockMs = 0;
     let inLogicalSync = false;
     let fileExpectsSpeech = false;
     let fileBursts = [];
@@ -820,6 +827,27 @@
 
     function fmtTrailMs(ms) {
       return Math.round(normalizeTrailMs(ms) / 1000) + ' s';
+    }
+
+    function noteStrongLock(judged, result, clipMs) {
+      const strong = judged.ok && result &&
+        (result.score || 0) >= STRONG_LOCK_SCORE &&
+        (judged.coverage || 0) >= STRONG_LOCK_COVERAGE;
+      if (strong) {
+        strongLockMs = Math.min(STRONG_LOCK_MAX_MS, strongLockMs + clipMs);
+      } else {
+        strongLockMs = Math.max(0, strongLockMs - STRONG_LOCK_DECAY_MS);
+      }
+    }
+
+    function cutoutTriggerMs() {
+      if (strongLockMs >= STRONG_LOCK_MIN_MS) {
+        return Math.max(
+          state.settings.silenceDurationMs + 2000,
+          Math.round(state.settings.silenceDurationMs * STRONG_LOCK_SILENCE_MULT)
+        );
+      }
+      return state.settings.silenceDurationMs;
     }
 
     function isAudioFile(file) {
@@ -1079,7 +1107,7 @@
         alert('No audio files found in that folder.');
         return false;
       }
-      if (state.mode !== 'idle' && state.mode !== 'backing') await disarm(false);
+      await disarm(true);
       revokeTracks();
       folderName = name || audioFiles[0].webkitRelativePath?.split(/[\\/]/)[0] || 'Audio folder';
       state.tracks = audioFiles
@@ -1422,7 +1450,7 @@
         if (unexpectedSilenceMs > 0) {
           return line + ' · file expects speech · quiet ' +
             (unexpectedSilenceMs / 1000).toFixed(1) + ' / ' +
-            (state.settings.silenceDurationMs / 1000).toFixed(1) + ' s';
+            (cutoutTriggerMs() / 1000).toFixed(1) + ' s';
         }
         return line;
       }
@@ -1443,7 +1471,7 @@
         if (!fileExpectsSpeech) return line + ' · file pause';
         if (unexpectedSilenceMs > 0) {
           return line + ' · quiet ' + (unexpectedSilenceMs / 1000).toFixed(1) + ' / ' +
-            (state.settings.silenceDurationMs / 1000).toFixed(1) + ' s';
+            (cutoutTriggerMs() / 1000).toFixed(1) + ' s';
         }
         return line;
       }
@@ -1633,11 +1661,12 @@
       return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     }
 
-    function selectTrack(id) {
-      if (state.mode === 'primed' || state.mode === 'manual' || state.mode === 'armed' || state.mode === 'cutout') return;
+    async function selectTrack(id) {
+      await disarm(true);
       state.selectedId = id;
       renderTrackList();
       saveLibraryMeta();
+      updateUI();
     }
 
     async function probeDuration(track) {
@@ -2640,6 +2669,7 @@
           result.gapBins + ' quiet, blur ' + Math.round(result.gapBlurMs || 0) + ' ms)')
         : 'gaps n/a';
       const base = formatClipLine(result, judged, clockNote);
+      noteStrongLock(judged, result, clipMs);
       if (judged.ok) {
         lastClipStatus = 'hit';
         lastClipFail = '';
@@ -2795,6 +2825,7 @@
       const drift = Math.abs(absOffset - fileStart);
       const close = drift < 1.5;
       const good = judged.ok && close;
+      noteStrongLock({ ok: good, coverage: judged.coverage }, result, clipMs);
       lastMatchScore = result.score;
       lastClipHits = Math.round(result.hits || 0);
       lastClipContrast = result.contrast || 0;
@@ -2885,6 +2916,7 @@
       const drift = Math.abs(absOffset - fileStart);
       const close = drift < 1.5;
       const good = judged.ok && close;
+      noteStrongLock({ ok: good, coverage: judged.coverage }, result, clipMs);
       lastMatchScore = result.score;
       lastClipHits = Math.round(result.hits || 0);
       lastClipContrast = result.contrast || 0;
@@ -3665,7 +3697,7 @@
       if (cutoutVerifyPending) return;
       if (Date.now() < cutoutCooldownUntil) return;
       if (!fileExpectsSpeech) return;
-      if (unexpectedSilenceMs < state.settings.silenceDurationMs) return;
+      if (unexpectedSilenceMs < cutoutTriggerMs()) return;
       if (fileDuration && roomPosition() / fileDuration > FILE_END_THRESHOLD) return;
 
       if (backupAudio) backupAudio.pause();
@@ -3739,6 +3771,7 @@
         clipLog = [];
         lockReason = '';
         lastMatchScore = 0;
+        strongLockMs = 0;
         hasAlign = false;
         clipEnv = null;
         clipEnvFileAt = 0;
@@ -3844,6 +3877,7 @@
 
       resetCutoutState();
       lastMatchScore = 0;
+      strongLockMs = 0;
       lastMatchGated = true;
       lastMatchBurstCount = 0;
       inLogicalSync = false;
