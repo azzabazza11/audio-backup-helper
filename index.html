@@ -467,6 +467,7 @@
     </div>
     <h1>Back Me Up</h1>
     <div class="topbar-actions">
+      <button type="button" class="btn ghost icon-btn" id="btnViz" title="Show fingerprint" aria-pressed="false">Viz</button>
       <button type="button" class="btn ghost icon-btn" id="btnDebug" title="Show debug overlay" aria-pressed="false">Debug</button>
       <button type="button" class="btn ghost" id="btn-install" hidden>Install</button>
       <button type="button" class="btn ghost" id="btnReload" title="Reload app">↻</button>
@@ -512,7 +513,7 @@
     <div class="trail-row" id="trailRow" hidden>
       <span class="trail-label">Trail</span>
       <button type="button" class="trail-btn" id="btnTrailDown" aria-label="Decrease trail time">−</button>
-      <span class="mono trail-val" id="trailVal">1.5 s</span>
+      <span class="mono trail-val" id="trailVal">2 s</span>
       <button type="button" class="trail-btn" id="btnTrailUp" aria-label="Increase trail time">+</button>
     </div>
     <div class="mic-meter" id="micMeterWrap" hidden>
@@ -552,8 +553,8 @@
     </summary>
     <div class="setting-row">
       <label for="bufferDelay">Buffer delay (backup trails the amp)</label>
-      <input type="range" id="bufferDelay" min="500" max="30000" step="500" value="1500" />
-      <span class="val mono" id="bufferDelayVal">1.5 s</span>
+      <input type="range" id="bufferDelay" min="1000" max="30000" step="1000" value="2000" />
+      <span class="val mono" id="bufferDelayVal">2 s</span>
     </div>
     <div class="setting-row">
       <label for="silenceThreshold">Mic silence (RMS below this = quiet)</label>
@@ -629,8 +630,8 @@
     const APP_VER = '1.5.5';
 
     const ENVELOPE_RATE = 20;
-    const TRAIL_STEP_MS = 500;
-    const TRAIL_HOLD_STEP_MS = 2500;
+    const TRAIL_STEP_MS = 1000;
+    const TRAIL_HOLD_STEP_MS = 1000;
     const LONG_PRESS_MS = 550;
     const LISTEN_MS = 50;
     const MIN_BURST_SEC = 0.18;
@@ -679,7 +680,7 @@
       mode: 'idle',
       analysing: false,
       settings: {
-        bufferDelayMs: 1500,
+        bufferDelayMs: 2000,
         silenceThreshold: 0.02,
         silenceDurationMs: 800,
         fingerprintSec: 30,
@@ -740,6 +741,8 @@
     let lockPositionSec = 0;
     let lockClockAt = 0;
     let lockedBufferMs = 0;
+    let manualMeasuredTrailMs = 0;
+    let manualTrailAdjustMs = 0;
     let trackingLocked = false;
     let pendingPlayTimer = null;
     let captureNode = null;
@@ -784,6 +787,7 @@
     let fpIndexBusy = false;
     let fpGen = 0;
     let showDebug = false;
+    let showViz = false;
     let settingsLocked = false;
     let armKind = null;
     let manualStartedAt = 0;
@@ -808,6 +812,14 @@
         return (ms % 1000 === 0 ? sec.toFixed(0) : sec.toFixed(1)) + ' s';
       }
       return ms + ' ms';
+    }
+
+    function normalizeTrailMs(ms) {
+      return Math.max(1000, Math.min(30000, Math.round(ms / 1000) * 1000));
+    }
+
+    function fmtTrailMs(ms) {
+      return Math.round(normalizeTrailMs(ms) / 1000) + ' s';
     }
 
     function isAudioFile(file) {
@@ -879,6 +891,7 @@
           confirmHoldMs: state.settings.confirmHoldMs,
           patternBlurMs: state.settings.patternBlurMs,
           showDebug: !!showDebug,
+          showViz: !!showViz,
           settingsLocked: !!settingsLocked,
           silenceManual: !!silenceManual
         }).catch(() => {});
@@ -912,7 +925,7 @@
         const saved = await kvGet('settings');
         if (!saved || typeof saved !== 'object') return;
         const s = state.settings;
-        if (saved.bufferDelayMs != null) s.bufferDelayMs = clampSetting(saved.bufferDelayMs, 500, 30000);
+        if (saved.bufferDelayMs != null) s.bufferDelayMs = normalizeTrailMs(saved.bufferDelayMs);
         if (saved.silenceThreshold != null) s.silenceThreshold = clampSetting(saved.silenceThreshold, SILENCE_MIN, SILENCE_MAX);
         if (saved.silenceDurationMs != null) s.silenceDurationMs = clampSetting(saved.silenceDurationMs, 400, 30000);
         if (saved.fingerprintSec != null) s.fingerprintSec = clampSetting(saved.fingerprintSec, 15, 30);
@@ -921,10 +934,12 @@
         if (saved.confirmHoldMs != null) s.confirmHoldMs = clampSetting(saved.confirmHoldMs, 3000, 10000);
         if (saved.patternBlurMs != null) s.patternBlurMs = clampSetting(saved.patternBlurMs, 0, 400);
         if (saved.showDebug != null) showDebug = !!saved.showDebug;
+        if (saved.showViz != null) showViz = !!saved.showViz;
         if (saved.settingsLocked != null) settingsLocked = !!saved.settingsLocked;
         if (saved.silenceManual) silenceManual = true;
         applySettingsToUi();
         applyDebugUi();
+        applyVizUi();
         applySettingsLockUi();
       } catch (err) {
         console.warn('Could not restore settings', err);
@@ -1278,8 +1293,11 @@
     }
 
     function effectiveTrailMs() {
+      if (armKind === 'manual' && trackingLocked && manualMeasuredTrailMs) {
+        return normalizeTrailMs(manualMeasuredTrailMs + manualTrailAdjustMs);
+      }
       if (trackingLocked && lockedBufferMs) return lockedBufferMs;
-      return state.settings.bufferDelayMs;
+      return normalizeTrailMs(state.settings.bufferDelayMs);
     }
 
     function manualClockSec() {
@@ -1295,12 +1313,14 @@
       row.hidden = !show;
       if (!show) return;
       const ms = effectiveTrailMs();
-      val.textContent = (ms / 1000).toFixed(1) + ' s';
+      val.textContent = fmtTrailMs(ms);
     }
 
     function syncBufferDelayUi() {
-      $('bufferDelay').value = String(state.settings.bufferDelayMs);
-      $('bufferDelayVal').textContent = fmtSettingMs(state.settings.bufferDelayMs);
+      const ms = normalizeTrailMs(state.settings.bufferDelayMs);
+      state.settings.bufferDelayMs = ms;
+      $('bufferDelay').value = String(ms);
+      $('bufferDelayVal').textContent = fmtTrailMs(ms);
       updateTrailUi();
     }
 
@@ -1314,10 +1334,19 @@
     }
 
     function adjustTrail(deltaMs) {
-      const next = clampSetting(state.settings.bufferDelayMs + deltaMs, 500, 30000);
-      if (next === state.settings.bufferDelayMs && (!trackingLocked || lockedBufferMs === next)) return;
+      const current = effectiveTrailMs();
+      const next = normalizeTrailMs(current + deltaMs);
+      if (next === current) return;
       state.settings.bufferDelayMs = next;
-      if (trackingLocked) lockedBufferMs = next;
+      if (armKind === 'manual' && trackingLocked && manualMeasuredTrailMs) {
+        manualTrailAdjustMs = next - manualMeasuredTrailMs;
+        lockedBufferMs = next;
+        manualTemplate = null;
+        manualWinStart = -1;
+        manualWinDur = 0;
+      } else if (trackingLocked) {
+        lockedBufferMs = next;
+      }
       syncBufferDelayUi();
       applyTrailToPlayback();
       scheduleSaveSettings();
@@ -1379,8 +1408,7 @@
           ' · ' + clipBit + holdBit;
       }
       if (state.mode === 'armed') {
-        const trailSec = lockedBufferMs / 1000;
-        let line = 'Locked · ' + trailSec.toFixed(1) + ' s behind the amp';
+        let line = 'Locked · ' + fmtTrailMs(lockedBufferMs) + ' behind the amp';
         if (clipCollecting && spotMode) return line + ' · spot-checking…';
         const wait = spotWaitSec();
         if (wait != null && trackingLocked) {
@@ -1400,18 +1428,17 @@
       }
       if (state.mode === 'cutout') return 'Mic quiet where the file still has speech — Take over at the amp position';
       if (state.mode === 'manual') {
-        const trailSec = effectiveTrailMs() / 1000;
         if (!trackingLocked) {
           if (clipCollecting) return 'Tracking · recording clip near the expected file time…';
           if (confirmStartedAt) {
             return 'Tracking · matching ' + (confirmHeldMs / 1000).toFixed(1) + ' / ' +
               (state.settings.confirmHoldMs / 1000).toFixed(1) + ' s · trail preset ' +
-              trailSec.toFixed(1) + ' s';
+              fmtTrailMs(effectiveTrailMs());
           }
-          if (lastClipStatus === 'miss') return 'Tracking · last clip missed · trail preset ' + trailSec.toFixed(1) + ' s';
-          return 'Tracking · listening for local match · trail preset ' + trailSec.toFixed(1) + ' s';
+          if (lastClipStatus === 'miss') return 'Tracking · last clip missed · trail preset ' + fmtTrailMs(effectiveTrailMs());
+          return 'Tracking · listening for local match · trail preset ' + fmtTrailMs(effectiveTrailMs());
         }
-        let line = 'Tracking · trail measured ' + trailSec.toFixed(1) + ' s';
+        let line = 'Tracking · trail measured ' + fmtTrailMs(effectiveTrailMs());
         if (lastSpotStatus) line += ' · ' + lastSpotStatus;
         if (!fileExpectsSpeech) return line + ' · file pause';
         if (unexpectedSilenceMs > 0) {
@@ -1538,12 +1565,11 @@
         btn.disabled = false;
       } else if (state.mode === 'armed') {
         pill.classList.add('listening');
-        const trailSec = lockedBufferMs / 1000;
         $('statusText').textContent = (clipCollecting && (spotMode || cutoutVerifyMode))
           ? (cutoutVerifyMode ? 'Re-checking sync' : 'Spot-checking lock')
           : fileExpectsSpeech
-          ? ('Listening · backup ' + trailSec.toFixed(1) + ' s behind amp')
-          : ('Listening · expected pause · ' + trailSec.toFixed(1) + ' s behind');
+          ? ('Listening · backup ' + fmtTrailMs(lockedBufferMs) + ' behind amp')
+          : ('Listening · expected pause · ' + fmtTrailMs(lockedBufferMs) + ' behind');
         btn.textContent = 'Disarm';
         btn.className = 'btn';
         btn.disabled = false;
@@ -1572,7 +1598,7 @@
       $('micMeterWrap').hidden = !showMic;
       $('syncLine').hidden = !showMic;
       if (showMic) $('syncLine').textContent = syncLineText();
-      if (showDebug) renderFingerprintViz();
+      if (showDebug || showViz) renderFingerprintViz();
       renderTriggerLog();
 
       $('btnLoadFolder').disabled = state.mode !== 'idle' && state.mode !== 'backing';
@@ -2051,6 +2077,16 @@
       return { ok: reasons.length === 0, reasons, needHits, needScore, coverage };
     }
 
+    function applyVizUi() {
+      const btn = $('btnViz');
+      if (btn) {
+        btn.classList.toggle('on', showViz);
+        btn.setAttribute('aria-pressed', showViz ? 'true' : 'false');
+        btn.title = showViz ? 'Hide fingerprint' : 'Show fingerprint';
+      }
+      if (showDebug || showViz) renderFingerprintViz();
+    }
+
     function applyDebugUi() {
       const btn = $('btnDebug');
       if (btn) {
@@ -2058,15 +2094,13 @@
         btn.setAttribute('aria-pressed', showDebug ? 'true' : 'false');
         btn.title = showDebug ? 'Hide debug overlay' : 'Show debug overlay';
       }
-      const viz = $('fpViz');
-      if (viz) viz.hidden = !showDebug;
       const gates = $('triggerGates');
       if (gates) gates.hidden = !showDebug;
       const log = $('triggerLog');
       if (log) log.hidden = !showDebug;
       const actions = document.querySelector('.trigger-actions');
       if (actions) actions.hidden = !showDebug;
-      if (showDebug) renderFingerprintViz();
+      if (showDebug || showViz) renderFingerprintViz();
     }
 
     function applySettingsLockUi() {
@@ -2340,6 +2374,7 @@
           confirmHoldMs: state.settings.confirmHoldMs,
           patternBlurMs: state.settings.patternBlurMs,
           showDebug: !!showDebug,
+          showViz: !!showViz,
           settingsLocked: !!settingsLocked
         }),
         'hold=' + (confirmHeldMs / 1000).toFixed(1) + 's streak=' + hitStreak +
@@ -3245,7 +3280,7 @@
     function renderFingerprintViz() {
       const viz = $('fpViz');
       if (!viz) return;
-      const show = showDebug &&
+      const show = (showViz || showDebug) &&
         (state.mode === 'primed' || state.mode === 'manual' || state.mode === 'armed' || state.mode === 'cutout' ||
           state.mode === 'seeking' || state.mode === 'backing') &&
         fileEnvelope && fileEnvelope.length;
@@ -3484,9 +3519,10 @@
 
       if (armKind === 'manual') {
         const backupNow = manualClockSec();
-        const computedTrail = Math.round(Math.max(500, Math.min(30000, (roomNow - backupNow) * 1000)));
-        lockedBufferMs = computedTrail;
-        state.settings.bufferDelayMs = computedTrail;
+        const computedTrail = normalizeTrailMs((roomNow - backupNow) * 1000);
+        manualMeasuredTrailMs = computedTrail;
+        lockedBufferMs = normalizeTrailMs(manualMeasuredTrailMs + manualTrailAdjustMs);
+        state.settings.bufferDelayMs = lockedBufferMs;
         syncBufferDelayUi();
         lockPositionSec = roomNow;
         lockClockAt = Date.now();
@@ -3732,6 +3768,8 @@
         lockPositionSec = 0;
         lockClockAt = 0;
         lockedBufferMs = 0;
+        manualMeasuredTrailMs = 0;
+        manualTrailAdjustMs = 0;
         trackingLocked = false;
         manualStartedAt = 0;
         manualBaseSec = 0;
@@ -3814,6 +3852,8 @@
       lockPositionSec = 0;
       lockClockAt = 0;
       lockedBufferMs = 0;
+      manualMeasuredTrailMs = 0;
+      manualTrailAdjustMs = 0;
       trackingLocked = false;
       manualStartedAt = 0;
       manualBaseSec = 0;
@@ -3842,7 +3882,7 @@
       const progressInterval = setInterval(() => {
         if (state.mode !== 'backing') { clearInterval(progressInterval); return; }
         updateProgressDisplay();
-        if (showDebug) renderFingerprintViz();
+        if (showDebug || showViz) renderFingerprintViz();
       }, 200);
     }
 
@@ -3925,6 +3965,12 @@
       location.reload();
     });
 
+    $('btnViz').addEventListener('click', () => {
+      showViz = !showViz;
+      applyVizUi();
+      scheduleSaveSettings();
+    });
+
     $('btnDebug').addEventListener('click', () => {
       showDebug = !showDebug;
       applyDebugUi();
@@ -3945,8 +3991,17 @@
     });
 
     $('bufferDelay').addEventListener('input', e => {
-      state.settings.bufferDelayMs = +e.target.value;
-      if (trackingLocked) lockedBufferMs = state.settings.bufferDelayMs;
+      const next = normalizeTrailMs(+e.target.value);
+      state.settings.bufferDelayMs = next;
+      if (armKind === 'manual' && trackingLocked && manualMeasuredTrailMs) {
+        manualTrailAdjustMs = next - manualMeasuredTrailMs;
+        lockedBufferMs = next;
+        manualTemplate = null;
+        manualWinStart = -1;
+        manualWinDur = 0;
+      } else if (trackingLocked) {
+        lockedBufferMs = next;
+      }
       syncBufferDelayUi();
       applyTrailToPlayback();
       scheduleSaveSettings();
@@ -4011,6 +4066,7 @@
     updateUI();
     restoreSettings().then(() => {
       applyDebugUi();
+      applyVizUi();
       applySettingsLockUi();
       restoreLibrary();
     });
