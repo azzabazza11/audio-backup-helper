@@ -323,7 +323,7 @@
 
   <section class="card" id="setupCard">
     <h2>Audio folder</h2>
-    <p class="hint" id="folderHint">Load the folder of instruction audio. Pick the track, then arm backup. The first ~30 s of the file becomes a peak-hash fingerprint (mini-Shazam). The mic records short clips and only matching clips count toward lock — talking and other room noise is ignored. Cutout only fires if the mic goes quiet where the file still has speech. The folder and fingerprints stay on this phone.</p>
+    <p class="hint" id="folderHint">Load the folder of instruction audio. Pick the track, then arm backup. The first ~30 s from the first sound (leading silence is skipped) becomes a peak-hash fingerprint. The mic records short clips; only the current clip is shown on Heard. Matching clips count toward lock — talking and other room noise is ignored. Cutout only fires if the mic goes quiet where the file still has speech. The folder and fingerprints stay on this phone.</p>
     <button type="button" class="btn primary" id="btnLoadFolder" style="margin-top:12px;width:100%">Load audio folder</button>
     <input type="file" id="folderInput" webkitdirectory multiple accept="audio/*" hidden />
     <ul class="track-list" id="trackList" hidden></ul>
@@ -408,7 +408,7 @@
       <input type="range" id="matchThreshold" min="0.25" max="0.85" step="0.05" value="0.5" />
       <span class="val mono" id="matchThresholdVal">0.50</span>
     </div>
-    <p class="hint cal-hint" id="lockNeedHint">A clip is a hit only if score, peak-hits, contrast, coverage, and file-pause quiet all pass. Lock needs two hits in a row plus the hold time. Talking should fail; the real file should pass by a wide margin.</p>
+    <p class="hint cal-hint" id="lockNeedHint">A clip is a hit only if rare-hash score, coverage of hashes that exist in the file, and file-pause quiet all pass. Lock needs two hits in a row plus the hold time. Talking should fail; the real file should pass by a wide margin.</p>
     <div class="setting-row">
       <label for="confirmHold">Hold match before lock</label>
       <input type="range" id="confirmHold" min="3000" max="10000" step="500" value="5000" />
@@ -426,7 +426,7 @@
     <button type="button" class="btn" id="btnForgetFingerprints" style="width:100%;margin-top:8px">Clear stored fingerprints</button>
   </details>
 
-  <p class="ver mono" id="appVer">v1.4.7</p>
+  <p class="ver mono" id="appVer">v1.4.8</p>
 
   <div class="bottom-bar">
     <button type="button" class="btn primary" id="btnMain" disabled>Back me up</button>
@@ -443,7 +443,7 @@
 
   <script>
     const $ = id => document.getElementById(id);
-    const APP_VER = '1.4.7';
+    const APP_VER = '1.4.8';
 
     const ENVELOPE_RATE = 20;
     const LISTEN_MS = 50;
@@ -479,7 +479,7 @@
     const SPOT_MAX = 2;
     const SPOT_WAIT_MS = 60000;
     const SPOT_PREROLL = 0.35;
-    const FP_CACHE_VER = 1;
+    const FP_CACHE_VER = 2;
     const IDB_NAME = 'back-me-up';
     const IDB_VER = 1;
 
@@ -566,6 +566,8 @@
     let alignPerfAt = 0;
     let alignFileAt = 0;
     let hasAlign = false;
+    let clipEnv = null;
+    let clipEnvFileAt = 0;
     let micEnvT = [];
     let micEnvV = [];
     let spotMode = false;
@@ -747,14 +749,26 @@
       };
     }
 
+    function firstBurstOriginSec(env, thresh) {
+      const bursts = extractBursts(env, thresh);
+      if (!bursts.length) return 0;
+      return Math.max(0, bursts[0].start - 0.08);
+    }
+
+    function templateOriginSec() {
+      return (templateIndex && templateIndex.originSec) || 0;
+    }
+
     function hydrateFingerprint(row) {
       fileDuration = row.fileDuration || row.duration || 0;
       fileEnvelope = row.envelope;
       fileSpeechThreshold = row.thresh;
       fileBursts = extractBursts(fileEnvelope, fileSpeechThreshold);
-      const fpEnd = Math.min(fileEnvelope.length, Math.ceil(state.settings.fingerprintSec * ENVELOPE_RATE));
-      startBursts = extractBursts(fileEnvelope, fileSpeechThreshold, 0, fpEnd);
       templateIndex = unpackTemplate(row);
+      const origin = templateOriginSec();
+      const fpStart = Math.max(0, Math.floor(origin * ENVELOPE_RATE));
+      const fpEnd = Math.min(fileEnvelope.length, fpStart + Math.ceil(state.settings.fingerprintSec * ENVELOPE_RATE));
+      startBursts = extractBursts(fileEnvelope, fileSpeechThreshold, fpStart, fpEnd);
       updatePatternBlurHint();
     }
 
@@ -958,7 +972,8 @@
       const envelope = computeEnvelope(buffer, ENVELOPE_RATE);
       const peak = peakOf(envelope) || 0.001;
       const thresh = Math.max(peak * 0.08, 0.008);
-      const template = buildTemplateIndex(buffer, state.settings.fingerprintSec);
+      const origin = firstBurstOriginSec(envelope, thresh);
+      const template = buildTemplateIndex(buffer, state.settings.fingerprintSec, origin);
       return { buffer, envelope, thresh, template, duration: buffer.duration };
     }
 
@@ -1460,11 +1475,15 @@
     }
 
     function scoreNeedHits() {
-      return Math.max(250, Math.round(state.settings.clipSec * 80));
+      return Math.max(20, Math.round(state.settings.clipSec * 10));
     }
 
     function minPeakHits() {
-      return Math.max(120, Math.round(state.settings.clipSec * 30));
+      return Math.max(15, Math.round(state.settings.clipSec * 8));
+    }
+
+    function minFoundHashes() {
+      return Math.max(30, Math.round(state.settings.clipSec * 15));
     }
 
     function envelopeFromPcm(samples, sampleRate) {
@@ -1531,7 +1550,9 @@
     }
 
     function scoreSilencePattern(samples, sampleRate, offsetSec) {
-      const blurMs = state.settings.patternBlurMs;
+      const gap = typicalFileGapSec();
+      let blurMs = state.settings.patternBlurMs;
+      if (gap) blurMs = Math.min(blurMs, Math.max(0, Math.round(gap * 300)));
       const empty = {
         gapUsable: false, gapScore: 1, gapAgree: 0, gapBins: 0, gapQuiet: 0, gapBlurMs: blurMs
       };
@@ -1576,19 +1597,26 @@
     function judgeClip(result) {
       const needHits = minPeakHits();
       const needScore = scoreNeedHits();
+      const needFound = minFoundHashes();
       const score = result.score;
       const coverage = result.coverage || 0;
+      const found = result.found || 0;
       const reasons = [];
       if (score < state.settings.matchThreshold) {
         reasons.push('score ' + score.toFixed(2) + ' < ' + state.settings.matchThreshold.toFixed(2) +
-          ' (need ~' + Math.ceil(state.settings.matchThreshold * needScore) + ' hits)');
+          ' (need ~' + (state.settings.matchThreshold * needScore).toFixed(0) + ' rare hashes)');
       }
-      if (result.hits < needHits) reasons.push('hits ' + result.hits + ' < ' + needHits);
+      if (result.hits < needHits) {
+        reasons.push('idf ' + result.hits.toFixed(0) + ' < ' + needHits);
+      }
       if ((result.contrast || 0) < MIN_CLIP_CONTRAST) {
         reasons.push('contrast ×' + (result.contrast || 0).toFixed(1) + ' < ' + MIN_CLIP_CONTRAST);
       }
+      if (found < needFound) {
+        reasons.push('only ' + found + ' clip hashes exist in the file (need ≥ ' + needFound + ')');
+      }
       if (coverage < MIN_CLIP_COVERAGE) {
-        reasons.push('cover ' + Math.round(coverage * 100) + '% at offset < ' +
+        reasons.push('cover ' + Math.round(coverage * 100) + '% of matched hashes < ' +
           Math.round(MIN_CLIP_COVERAGE * 100) + '%');
       }
       if (result.gapUsable && result.gapScore < MIN_GAP_SCORE) {
@@ -1608,8 +1636,8 @@
       const needHits = minPeakHits();
       const scoreHits = Math.ceil(state.settings.matchThreshold * scoreNeedHits());
       return 'Hit needs score ≥ ' + state.settings.matchThreshold.toFixed(2) +
-        ' (~' + scoreHits + ' peak-hits) · ≥ ' + needHits + ' hits · ×' + MIN_CLIP_CONTRAST +
-        ' contrast · ' + Math.round(MIN_CLIP_COVERAGE * 100) + '% cover at the matched time · ' +
+        ' (~' + scoreHits + ' rare hashes) · ≥ ' + needHits + ' idf · ×' + MIN_CLIP_CONTRAST +
+        ' contrast · ' + Math.round(MIN_CLIP_COVERAGE * 100) + '% of hashes that exist in the file · ' +
         'file pauses ≥ ' + Math.round(MIN_GAP_SCORE * 100) + '% quiet on mic (blur ' +
         Math.round(state.settings.patternBlurMs) + ' ms) · ' +
         MIN_LOCK_CLIPS + ' clips in a row that follow the file clock · ' +
@@ -1663,7 +1691,8 @@
         'folder=' + (folderName || '(none)'),
         'templateHashes=' + (templateIndex ? templateIndex.hashCount : 0) +
           ' unique=' + (templateIndex ? templateIndex.index.size : 0) +
-          ' peaks=' + (templateIndex ? templateIndex.peakCount : 0),
+          ' peaks=' + (templateIndex ? templateIndex.peakCount : 0) +
+          ' origin=' + fmtTime(templateOriginSec()),
         lockGatesText(),
         'settings ' + JSON.stringify({
           bufferDelayMs: state.settings.bufferDelayMs,
@@ -1733,16 +1762,16 @@
     function matchClipToTemplate(samples, sampleRate, template) {
       if (!template || !template.index.size) {
         return {
-          score: 0, hits: 0, contrast: 0, offsetSec: 0, looked: 0, hashes: 0,
-          coverage: 0, anyCover: 0, avgPost: 0, idfHits: 0
+          score: 0, hits: 0, contrast: 0, offsetSec: 0, looked: 0, found: 0, hashes: 0,
+          coverage: 0, anyCover: 0, avgPost: 0, idfHits: 0, rawHits: 0
         };
       }
       const peaks = constellationPeaks(samples, sampleRate);
       const hashes = hashesFromPeaks(peaks);
       if (hashes.length < 8) {
         return {
-          score: 0, hits: 0, contrast: 0, offsetSec: 0, looked: 0, hashes: hashes.length,
-          coverage: 0, anyCover: 0, avgPost: 0, idfHits: 0
+          score: 0, hits: 0, contrast: 0, offsetSec: 0, looked: 0, found: 0, hashes: hashes.length,
+          coverage: 0, anyCover: 0, avgPost: 0, idfHits: 0, rawHits: 0
         };
       }
       const votes = new Map();
@@ -1761,25 +1790,26 @@
           idfVotes.set(off, (idfVotes.get(off) || 0) + w);
         }
       }
-      const smoothed = off => (votes.get(off) || 0) + (votes.get(off - 1) || 0) + (votes.get(off + 1) || 0);
+      const idfSmoothed = off => (idfVotes.get(off) || 0) + (idfVotes.get(off - 1) || 0) + (idfVotes.get(off + 1) || 0);
       let bestOff = 0, best = 0;
-      votes.forEach((_, off) => {
-        const s = smoothed(off);
+      idfVotes.forEach((_, off) => {
+        const s = idfSmoothed(off);
         if (s > best) { best = s; bestOff = off; }
       });
-      const hits = best;
+      const idfHits = best;
+      const rawHits = (votes.get(bestOff) || 0) + (votes.get(bestOff - 1) || 0) + (votes.get(bestOff + 1) || 0);
       let second = 0;
-      votes.forEach((_, off) => {
+      idfVotes.forEach((_, off) => {
         if (Math.abs(off - bestOff) <= 3) return;
-        const s = smoothed(off);
+        const s = idfSmoothed(off);
         if (s > second) second = s;
       });
-      const uniq = hits / Math.max(1, second);
+      const uniq = idfHits / Math.max(0.01, second);
       const counts = [];
-      votes.forEach(c => counts.push(c));
+      idfVotes.forEach(c => counts.push(c));
       counts.sort((a, b) => a - b);
-      const median = counts.length ? counts[Math.floor(counts.length / 2)] : 1;
-      const contrast = hits / Math.max(1, median);
+      const median = counts.length ? counts[Math.floor(counts.length / 2)] : 0.01;
+      const contrast = idfHits / Math.max(0.01, median);
       let localLooked = 0;
       for (let i = 0; i < hashes.length; i++) {
         const found = template.index.get(hashes[i].hash);
@@ -1792,17 +1822,15 @@
           }
         }
       }
-      const coverage = localLooked / Math.max(1, hashes.length);
+      const coverage = localLooked / Math.max(1, looked);
       const anyCover = looked / Math.max(1, hashes.length);
       const avgPost = looked ? postSum / looked : 0;
-      const idfHits = (idfVotes.get(bestOff) || 0) +
-        (idfVotes.get(bestOff - 1) || 0) + (idfVotes.get(bestOff + 1) || 0);
       const need = scoreNeedHits();
-      const score = Math.min(1, hits / need);
+      const score = Math.min(1, idfHits / need);
       return {
-        score, hits, contrast, uniq, second,
+        score, hits: idfHits, rawHits, contrast, uniq, second,
         offsetSec: Math.max(0, bestOff * FP_HOP_SEC),
-        looked: localLooked, hashes: hashes.length, coverage, anyCover, avgPost, idfHits
+        looked: localLooked, found: looked, hashes: hashes.length, coverage, anyCover, avgPost, idfHits
       };
     }
 
@@ -1895,6 +1923,9 @@
           if (wasSpot) applySpotMatch(samples, sr, spotStart, need / sr * 1000);
           else {
             const result = matchClipToTemplate(samples, sr, templateIndex);
+            result.offsetSec = templateOriginSec() + result.offsetSec;
+            clipEnv = envelopeFromPcm(samples, sr);
+            clipEnvFileAt = result.offsetSec;
             const pattern = scoreSilencePattern(samples, sr, result.offsetSec);
             applyClipMatch(Object.assign(result, pattern), need / sr * 1000);
           }
@@ -1919,7 +1950,7 @@
         }
       }
       lastMatchScore = result.score;
-      lastClipHits = result.hits;
+      lastClipHits = Math.round(result.hits || 0);
       lastClipOffset = result.offsetSec;
       lastClipContrast = result.contrast || 0;
       lastClipCoverage = judged.coverage;
@@ -1933,12 +1964,13 @@
         : 'gaps n/a';
       const coverPct = Math.round(judged.coverage * 100);
       const anyPct = Math.round((result.anyCover || 0) * 100);
+      const found = result.found || 0;
       const uniqBit = result.second ? (' · uniq ×' + result.uniq.toFixed(1)) : '';
-      const idfBit = result.idfHits ? (' · idf ' + result.idfHits.toFixed(0)) : '';
+      const rawBit = result.rawHits ? (' · raw ' + Math.round(result.rawHits)) : '';
       const postBit = result.avgPost ? (' · post ×' + result.avgPost.toFixed(1)) : '';
       const base = 'score ' + result.score.toFixed(2) +
-        ' · ' + result.hits + ' hits · ×' + lastClipContrast.toFixed(1) + uniqBit + idfBit + postBit +
-        ' · cover ' + coverPct + '% at (' + lastClipLooked + '/' + lastClipHashes +
+        ' · idf ' + lastClipHits + rawBit + ' · ×' + lastClipContrast.toFixed(1) + uniqBit + postBit +
+        ' · cover ' + coverPct + '% of matched (' + lastClipLooked + '/' + found +
         ') · ' + anyPct + '% any · ' + lastClipGapBit + ' · @ ' +
         fmtTime(result.offsetSec) + clockNote;
       if (judged.ok) {
@@ -2004,6 +2036,8 @@
       lastClipHits = result.hits;
       lastClipContrast = result.contrast || 0;
       lastClipOffset = (local.originSec || 0) + result.offsetSec;
+      clipEnv = envelopeFromPcm(samples, sampleRate);
+      clipEnvFileAt = lastClipOffset;
       const close = Math.abs(result.offsetSec - preroll) < 0.85;
       const good = result.score >= state.settings.matchThreshold && result.hits >= 50 && result.contrast >= 3 && close;
       spotChecksDone++;
@@ -2275,47 +2309,55 @@
       if (!show) return;
 
       const windowSec = fpWindowSec();
+      const origin = templateOriginSec();
       const fileCanvas = $('fpFileCanvas');
       const micCanvas = $('fpMicCanvas');
       if (!fileCanvas || !micCanvas) return;
 
-      const nFile = Math.min(fileEnvelope.length, Math.ceil(windowSec * ENVELOPE_RATE));
-      const filePeak = peakOfRange(fileEnvelope, 0, nFile);
+      const i0 = Math.max(0, Math.round(origin * ENVELOPE_RATE));
+      const nFile = Math.min(Math.max(0, fileEnvelope.length - i0), Math.ceil(windowSec * ENVELOPE_RATE));
+      const filePeak = peakOfRange(fileEnvelope, i0, i0 + nFile);
       const fileXs = [];
       const fileYs = [];
       for (let i = 0; i < nFile; i++) {
         fileXs.push(i / ENVELOPE_RATE);
-        fileYs.push(fileEnvelope[i]);
+        fileYs.push(fileEnvelope[i0 + i]);
       }
 
       const micXs = [];
       const micYs = [];
       let micPeak = 0.0001;
-      for (let i = 0; i < micEnvT.length; i++) {
-        const ft = vizFileTime(micEnvT[i]);
-        if (ft == null) continue;
-        if (ft < -0.05 || ft > windowSec + 0.05) continue;
-        micXs.push(ft);
-        micYs.push(micEnvV[i]);
-        if (micEnvV[i] > micPeak) micPeak = micEnvV[i];
+      if (clipEnv && clipEnv.length) {
+        const startWin = clipEnvFileAt - origin;
+        for (let i = 0; i < clipEnv.length; i++) {
+          micXs.push(startWin + i / ENVELOPE_RATE);
+          micYs.push(clipEnv[i]);
+          if (clipEnv[i] > micPeak) micPeak = clipEnv[i];
+        }
       }
       const gain = Math.max(0.25, Math.min(8, filePeak / micPeak));
+      const mark = hasAlign ? (alignFileAt - origin) : null;
 
-      const fileDraw = paintEnvelope(fileCanvas, '#123c32', hasAlign ? alignFileAt : null, windowSec);
+      const fileDraw = paintEnvelope(fileCanvas, '#123c32', mark, windowSec);
       drawEnvelopeSeries(fileDraw.ctx, fileDraw.w, fileDraw.h, fileXs, fileYs, filePeak, windowSec);
-      if (hasAlign) drawAlignMarker(fileDraw.ctx, fileDraw.w, fileDraw.h, alignFileAt, windowSec);
+      if (mark != null) drawAlignMarker(fileDraw.ctx, fileDraw.w, fileDraw.h, mark, windowSec);
 
-      const micDraw = paintEnvelope(micCanvas, '#1b6b45', hasAlign ? alignFileAt : null, windowSec);
+      const micDraw = paintEnvelope(micCanvas, '#1b6b45', mark, windowSec);
       const scaled = micYs.map(v => v * gain);
       drawEnvelopeSeries(micDraw.ctx, micDraw.w, micDraw.h, micXs, scaled, filePeak, windowSec);
-      if (hasAlign) drawAlignMarker(micDraw.ctx, micDraw.w, micDraw.h, alignFileAt, windowSec);
+      if (mark != null) drawAlignMarker(micDraw.ctx, micDraw.w, micDraw.h, mark, windowSec);
 
-      $('fpFileLabel').textContent = 'File fingerprint';
-      $('fpMicLabel').textContent = hasAlign ? 'Heard (lined up to file)' : 'Heard';
+      $('fpFileLabel').textContent = origin > 0.05
+        ? ('File fingerprint from ' + fmtTime(origin))
+        : 'File fingerprint';
+      $('fpMicLabel').textContent = clipCollecting
+        ? 'Heard clip (recording…)'
+        : (clipEnv ? ('Heard clip @ ' + fmtTime(clipEnvFileAt)) : 'Heard clip (waiting)');
       const alignBit = hasAlign ? (' · lined up @ ' + fmtTime(alignFileAt)) : '';
       const spotBit = lastSpotStatus ? (' · ' + lastSpotStatus) : '';
       $('fpMeta').textContent =
-        'First ' + windowSec + ' s of file · ' +
+        (origin > 0.05 ? ('From first sound @ ' + fmtTime(origin) + ' · ') : 'From start of file · ') +
+        windowSec + ' s · ' +
         (templateIndex ? (templateIndex.hashCount + ' peak-hashes') : 'no hashes') +
         ' · clip ' + lastClipHits + ' hits' + alignBit + spotBit;
     }
@@ -2588,6 +2630,8 @@
         lockReason = '';
         lastMatchScore = 0;
         hasAlign = false;
+        clipEnv = null;
+        clipEnvFileAt = 0;
         micEnvT = [];
         micEnvV = [];
         spotMode = false;
@@ -2660,6 +2704,8 @@
       startBursts = [];
       liveBurst = null;
       completedMicBursts = [];
+      clipEnv = null;
+      clipEnvFileAt = 0;
       micEnvT = [];
       micEnvV = [];
       hasAlign = false;
