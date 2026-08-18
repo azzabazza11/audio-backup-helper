@@ -40,4 +40,4 @@ Install from Chrome (**Install** / Add to Home screen). Works offline for the ap
 2. Tap **Install** (or menu → Add to Home screen)
 3. Stuck on an old build? force-reload or clear site data
 
-Version: **1.4.4**
+Version: **1.4.5**

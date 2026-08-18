@@ -267,6 +267,8 @@
     .trigger-log li.hit { color: var(--ok); }
     .trigger-log li.miss { color: var(--bad); }
     .trigger-log li.lock { color: var(--ink); font-weight: 600; }
+    .trigger-actions { display: flex; gap: 8px; margin-top: 8px; }
+    .trigger-actions .btn { min-height: 44px; flex: 1; font-size: 0.88rem; }
     .fp-meta {
       font-size: 0.75rem; color: var(--muted); margin: 0 0 8px;
     }
@@ -358,6 +360,10 @@
       <p class="fp-meta mono" id="triggerGates"></p>
       <ol class="trigger-log" id="triggerLog"></ol>
       <p class="fp-meta mono" id="triggerVerdict"></p>
+      <div class="trigger-actions">
+        <button type="button" class="btn" id="btnCopyLog">Copy log</button>
+        <button type="button" class="btn" id="btnShareLog">Share log</button>
+      </div>
     </div>
   </section>
 
@@ -413,7 +419,7 @@
     <button type="button" class="btn" id="btnForgetFingerprints" style="width:100%;margin-top:8px">Clear stored fingerprints</button>
   </details>
 
-  <p class="ver mono" id="appVer">v1.4.4</p>
+  <p class="ver mono" id="appVer">v1.4.5</p>
 
   <div class="bottom-bar">
     <button type="button" class="btn primary" id="btnMain" disabled>Back me up</button>
@@ -430,7 +436,7 @@
 
   <script>
     const $ = id => document.getElementById(id);
-    const APP_VER = '1.4.4';
+    const APP_VER = '1.4.5';
 
     const ENVELOPE_RATE = 20;
     const LISTEN_MS = 50;
@@ -1462,7 +1468,7 @@
 
     function pushClipLog(entry) {
       clipLog.push(entry);
-      if (clipLog.length > 8) clipLog.shift();
+      if (clipLog.length > 24) clipLog.shift();
     }
 
     function lockGatesText() {
@@ -1477,7 +1483,8 @@
     function renderTriggerLog() {
       const box = $('triggerBox');
       if (!box) return;
-      const show = state.mode === 'primed' || state.mode === 'armed' || state.mode === 'cutout';
+      const live = state.mode === 'primed' || state.mode === 'armed' || state.mode === 'cutout';
+      const show = live || clipLog.length > 0;
       box.hidden = !show;
       if (!show) return;
       $('triggerGates').textContent = lockGatesText();
@@ -1508,6 +1515,81 @@
       } else {
         v.textContent = 'Not locked — need ' + MIN_LOCK_CLIPS + ' strong clips in a row.';
       }
+    }
+
+    function diagnosticText() {
+      const track = selectedTrack();
+      const lines = [
+        'Back Me Up diagnostics v' + APP_VER,
+        new Date().toISOString(),
+        'mode=' + state.mode + (trackingLocked ? ' locked' : ''),
+        'track=' + (track ? track.name : '(none)'),
+        'folder=' + (folderName || '(none)'),
+        'templateHashes=' + (templateIndex ? templateIndex.hashCount : 0) +
+          ' peaks=' + (templateIndex ? templateIndex.peakCount : 0),
+        lockGatesText(),
+        'settings ' + JSON.stringify({
+          bufferDelayMs: state.settings.bufferDelayMs,
+          silenceThreshold: state.settings.silenceThreshold,
+          silenceManual: !!silenceManual,
+          silenceDurationMs: state.settings.silenceDurationMs,
+          fingerprintSec: state.settings.fingerprintSec,
+          clipSec: state.settings.clipSec,
+          matchThreshold: state.settings.matchThreshold,
+          confirmHoldMs: state.settings.confirmHoldMs
+        }),
+        'hold=' + (confirmHeldMs / 1000).toFixed(1) + 's streak=' + hitStreak +
+          ' lastFail=' + (lastClipFail || 'none'),
+        'lockReason=' + (lockReason || 'none'),
+        '--- clips ---'
+      ];
+      if (!clipLog.length) lines.push('(no clips)');
+      clipLog.forEach((e, i) => {
+        const when = e.at ? new Date(e.at).toISOString() : '';
+        lines.push((i + 1) + '. ' + (when ? when + ' ' : '') + e.line);
+      });
+      lines.push('--- paste this into the chat ---');
+      return lines.join('\n');
+    }
+
+    async function copyDiagnostics() {
+      const text = diagnosticText();
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          await navigator.clipboard.writeText(text);
+        } else {
+          const ta = document.createElement('textarea');
+          ta.value = text;
+          ta.setAttribute('readonly', '');
+          ta.style.position = 'fixed';
+          ta.style.left = '-9999px';
+          document.body.appendChild(ta);
+          ta.select();
+          document.execCommand('copy');
+          ta.remove();
+        }
+        const btn = $('btnCopyLog');
+        if (btn) {
+          const prev = btn.textContent;
+          btn.textContent = 'Copied';
+          setTimeout(() => { btn.textContent = prev; }, 1600);
+        }
+      } catch (err) {
+        alert('Could not copy. Use Share log instead.\n' + (err.message || err));
+      }
+    }
+
+    async function shareDiagnostics() {
+      const text = diagnosticText();
+      if (navigator.share) {
+        try {
+          await navigator.share({ title: 'Back Me Up log', text });
+          return;
+        } catch (err) {
+          if (err && err.name === 'AbortError') return;
+        }
+      }
+      await copyDiagnostics();
     }
 
     function matchClipToTemplate(samples, sampleRate, template) {
@@ -1677,6 +1759,7 @@
         confirmPositionSec = result.offsetSec + clipMs / 1000;
         pushClipLog({
           kind: 'hit',
+          at: Date.now(),
           line: 'HIT  ' + base + ' · streak ' + hitStreak + '/' + MIN_LOCK_CLIPS +
             ' · hold ' + (confirmHeldMs / 1000).toFixed(1) + 's'
         });
@@ -1684,7 +1767,7 @@
         const enoughHold = confirmHeldMs >= state.settings.confirmHoldMs;
         if (enoughClips && enoughHold) {
           lockReason = 'Locked on ' + hitStreak + ' hits in a row · last ' + base;
-          pushClipLog({ kind: 'lock', line: 'LOCK ' + lockReason });
+          pushClipLog({ kind: 'lock', at: Date.now(), line: 'LOCK ' + lockReason });
           activateSync(confirmPositionSec, 0);
           return;
         }
@@ -1694,6 +1777,7 @@
         hitStreak = 0;
         pushClipLog({
           kind: 'miss',
+          at: Date.now(),
           line: 'MISS ' + base + ' · ' + lastClipFail
         });
         if (confirmStartedAt) {
@@ -2377,10 +2461,6 @@
       spotChecksDone = 0;
       nextSpotAt = 0;
       lastSpotStatus = '';
-      clipLog = [];
-      lockReason = '';
-      hitStreak = 0;
-      lastClipFail = '';
       state.analysing = false;
 
       releaseWakeLock();
@@ -2440,6 +2520,8 @@
     $('folderInput').addEventListener('change', handleFolderPick);
     $('btnForgetLibrary').addEventListener('click', () => forgetLibrary());
     $('btnForgetFingerprints').addEventListener('click', () => forgetFingerprints());
+    $('btnCopyLog').addEventListener('click', () => copyDiagnostics());
+    $('btnShareLog').addEventListener('click', () => shareDiagnostics());
 
     $('btnMain').addEventListener('click', async () => {
       if (state.mode === 'idle') await prime();
