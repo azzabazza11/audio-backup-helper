@@ -3372,15 +3372,15 @@
 
     function roomPosition() {
       if (state.mode === 'backing' && backupAudio) {
-        // In manual-origin backing, amp clock is still manualClockSec.
-        // In auto-lock backing, amp = backup + trail.
+        // Manual-origin: amp clock is manualClockSec, independent of trail.
         if (armKind === 'manual' && manualStartedAt) {
-          return manualClockSec() + effectiveTrailMs() / 1000;
+          return manualClockSec();
         }
         return backupAudio.currentTime + lockedBufferMs / 1000;
       }
       if (state.mode === 'manual') {
-        return manualClockSec() + effectiveTrailMs() / 1000;
+        // Amp time is the user-started clock; trail only offsets the backup display.
+        return manualClockSec();
       }
       if (backupAudio && trackingLocked && !backupAudio.ended && !backupAudio.paused &&
           armKind !== 'manual' && state.mode !== 'manual') {
@@ -3393,7 +3393,11 @@
     }
 
     function backupPosition() {
-      if (state.mode === 'manual' && state.mode !== 'backing') return manualClockSec();
+      // Manual modes: backup lags amp by the trail amount.
+      if (armKind === 'manual' && manualStartedAt) {
+        if (state.mode === 'backing' && backupAudio) return backupAudio.currentTime;
+        return Math.max(0, manualClockSec() - effectiveTrailMs() / 1000);
+      }
       if (backupAudio && trackingLocked) return backupAudio.currentTime;
       return Math.max(0, roomPosition() - lockedBufferMs / 1000);
     }
