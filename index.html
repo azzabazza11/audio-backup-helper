@@ -603,13 +603,24 @@
       <span class="val mono" id="patternBlurVal">150 ms</span>
     </div>
     <p class="hint cal-hint" id="patternBlurHint">Second layer: quiet gaps in the file must also be quiet on the mic. Blur forgives early/late burst edges. Raise if the real amp barely misses; lower if talking still hits.</p>
+    <div class="setting-row">
+      <label for="gapConfidenceWeight">Gap weight in confidence</label>
+      <input type="range" id="gapConfidenceWeight" min="0.05" max="0.5" step="0.05" value="0.25" />
+      <span class="val mono" id="gapConfidenceWeightVal">0.25</span>
+    </div>
+    <div class="setting-row">
+      <label for="gapConfidenceBoost">Gap confidence boost</label>
+      <input type="range" id="gapConfidenceBoost" min="0.5" max="2.5" step="0.1" value="1.3" />
+      <span class="val mono" id="gapConfidenceBoostVal">1.3×</span>
+    </div>
+    <p class="hint cal-hint">Debug tuning for the confidence meter: raise these when quiet gaps and patch timing line up clearly even if raw loudness-sensitive hashes score low.</p>
     <button type="button" class="btn" id="btnBlurFromFile" style="width:100%;margin-top:8px">Set blur from this file’s pauses</button>
     <button type="button" class="btn" id="btnForgetLibrary" style="width:100%;margin-top:8px">Forget saved folder</button>
     <p class="hint cal-hint">Fingerprints stay until you clear them. Forgetting the folder does not delete stored fingerprints.</p>
     <button type="button" class="btn" id="btnForgetFingerprints" style="width:100%;margin-top:8px">Clear stored fingerprints</button>
   </details>
 
-  <p class="ver mono" id="appVer">v1.5.5</p>
+  <p class="ver mono" id="appVer">v1.5.6</p>
 
   <div class="bottom-bar">
     <p class="bottom-hint" id="mainBtnHint">Tap — manual tracking · Hold — auto lock-on</p>
@@ -627,7 +638,7 @@
 
   <script>
     const $ = id => document.getElementById(id);
-    const APP_VER = '1.5.5';
+    const APP_VER = '1.5.6';
 
     const ENVELOPE_RATE = 20;
     const TRAIL_STEP_MS = 1000;
@@ -694,6 +705,8 @@
         matchThreshold: 0.5,
         confirmHoldMs: 5000,
         patternBlurMs: 150,
+        gapConfidenceWeight: 0.25,
+        gapConfidenceBoost: 1.3,
         showDebug: false,
         settingsLocked: false
       }
@@ -918,6 +931,8 @@
           matchThreshold: state.settings.matchThreshold,
           confirmHoldMs: state.settings.confirmHoldMs,
           patternBlurMs: state.settings.patternBlurMs,
+          gapConfidenceWeight: state.settings.gapConfidenceWeight,
+          gapConfidenceBoost: state.settings.gapConfidenceBoost,
           showDebug: !!showDebug,
           showViz: !!showViz,
           settingsLocked: !!settingsLocked,
@@ -945,6 +960,10 @@
       $('confirmHoldVal').textContent = fmtSettingMs(s.confirmHoldMs);
       $('patternBlur').value = String(s.patternBlurMs);
       $('patternBlurVal').textContent = Math.round(s.patternBlurMs) + ' ms';
+      $('gapConfidenceWeight').value = String(s.gapConfidenceWeight);
+      $('gapConfidenceWeightVal').textContent = s.gapConfidenceWeight.toFixed(2);
+      $('gapConfidenceBoost').value = String(s.gapConfidenceBoost);
+      $('gapConfidenceBoostVal').textContent = s.gapConfidenceBoost.toFixed(1) + '×';
       updateCalibratorUi();
     }
 
@@ -961,6 +980,8 @@
         if (saved.matchThreshold != null) s.matchThreshold = clampSetting(saved.matchThreshold, 0.25, 0.85);
         if (saved.confirmHoldMs != null) s.confirmHoldMs = clampSetting(saved.confirmHoldMs, 3000, 10000);
         if (saved.patternBlurMs != null) s.patternBlurMs = clampSetting(saved.patternBlurMs, 0, 400);
+        if (saved.gapConfidenceWeight != null) s.gapConfidenceWeight = clampSetting(saved.gapConfidenceWeight, 0.05, 0.5);
+        if (saved.gapConfidenceBoost != null) s.gapConfidenceBoost = clampSetting(saved.gapConfidenceBoost, 0.5, 2.5);
         if (saved.showDebug != null) showDebug = !!saved.showDebug;
         if (saved.showViz != null) showViz = !!saved.showViz;
         if (saved.settingsLocked != null) settingsLocked = !!saved.settingsLocked;
@@ -2157,7 +2178,16 @@
       const gapPart = lastClipGapBit && lastClipGapBit.indexOf('n/a') < 0
         ? Math.max(0, Math.min(1, lastClipGapScore))
         : 1;
-      let q = 0.55 * scorePart + 0.3 * coverPart + 0.15 * gapPart;
+      const gapWeight = clampSetting(state.settings.gapConfidenceWeight, 0.05, 0.5);
+      const rest = Math.max(0.1, 1 - gapWeight);
+      const scoreWeight = rest * (0.55 / 0.85);
+      const coverWeight = rest * (0.30 / 0.85);
+      let q = scoreWeight * scorePart + coverWeight * coverPart + gapWeight * gapPart;
+      if (lastClipGapBit && lastClipGapBit.indexOf('n/a') < 0) {
+        const gapBoost = clampSetting(state.settings.gapConfidenceBoost, 0.5, 2.5);
+        const quietLift = Math.max(0, gapPart - 0.55) * 0.22 * gapBoost;
+        q = Math.min(1, q + quietLift);
+      }
       if (lastClipStatus === 'miss') q = Math.min(q, 0.34);
       if (lastClipStatus === 'hit' || trackingLocked) q = Math.max(q, Math.min(1, lastMatchScore));
       return Math.max(0, Math.min(1, q));
@@ -2402,6 +2432,8 @@
           matchThreshold: state.settings.matchThreshold,
           confirmHoldMs: state.settings.confirmHoldMs,
           patternBlurMs: state.settings.patternBlurMs,
+          gapConfidenceWeight: state.settings.gapConfidenceWeight,
+          gapConfidenceBoost: state.settings.gapConfidenceBoost,
           showDebug: !!showDebug,
           showViz: !!showViz,
           settingsLocked: !!settingsLocked
@@ -4074,6 +4106,18 @@
     $('patternBlur').addEventListener('input', e => {
       state.settings.patternBlurMs = +e.target.value;
       $('patternBlurVal').textContent = Math.round(state.settings.patternBlurMs) + ' ms';
+      scheduleSaveSettings();
+    });
+    $('gapConfidenceWeight').addEventListener('input', e => {
+      state.settings.gapConfidenceWeight = +e.target.value;
+      $('gapConfidenceWeightVal').textContent = state.settings.gapConfidenceWeight.toFixed(2);
+      updateClipConfidenceMeter();
+      scheduleSaveSettings();
+    });
+    $('gapConfidenceBoost').addEventListener('input', e => {
+      state.settings.gapConfidenceBoost = +e.target.value;
+      $('gapConfidenceBoostVal').textContent = state.settings.gapConfidenceBoost.toFixed(1) + '×';
+      updateClipConfidenceMeter();
       scheduleSaveSettings();
     });
     $('btnBlurFromFile').addEventListener('click', () => {
