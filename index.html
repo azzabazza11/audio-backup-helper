@@ -3372,7 +3372,12 @@
 
     function roomPosition() {
       if (state.mode === 'backing' && backupAudio) {
-        return backupAudio.currentTime;
+        // In manual-origin backing, amp clock is still manualClockSec.
+        // In auto-lock backing, amp = backup + trail.
+        if (armKind === 'manual' && manualStartedAt) {
+          return manualClockSec() + effectiveTrailMs() / 1000;
+        }
+        return backupAudio.currentTime + lockedBufferMs / 1000;
       }
       if (state.mode === 'manual') {
         return manualClockSec() + effectiveTrailMs() / 1000;
