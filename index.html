@@ -408,18 +408,25 @@
       <input type="range" id="matchThreshold" min="0.25" max="0.85" step="0.05" value="0.5" />
       <span class="val mono" id="matchThresholdVal">0.50</span>
     </div>
-    <p class="hint cal-hint" id="lockNeedHint">A clip is a hit only if score, peak-hits, contrast, and coverage all pass. Lock needs two hits in a row plus the hold time. Talking should fail; the real file should pass by a wide margin.</p>
+    <p class="hint cal-hint" id="lockNeedHint">A clip is a hit only if score, peak-hits, contrast, coverage, and file-pause quiet all pass. Lock needs two hits in a row plus the hold time. Talking should fail; the real file should pass by a wide margin.</p>
     <div class="setting-row">
       <label for="confirmHold">Hold match before lock</label>
       <input type="range" id="confirmHold" min="3000" max="10000" step="500" value="5000" />
       <span class="val mono" id="confirmHoldVal">5 s</span>
     </div>
+    <div class="setting-row">
+      <label for="patternBlur">Burst-edge blur</label>
+      <input type="range" id="patternBlur" min="0" max="400" step="25" value="150" />
+      <span class="val mono" id="patternBlurVal">150 ms</span>
+    </div>
+    <p class="hint cal-hint" id="patternBlurHint">Second layer: quiet gaps in the file must also be quiet on the mic. Blur forgives early/late burst edges. Raise if the real amp barely misses; lower if talking still hits.</p>
+    <button type="button" class="btn" id="btnBlurFromFile" style="width:100%;margin-top:8px">Set blur from this file’s pauses</button>
     <button type="button" class="btn" id="btnForgetLibrary" style="width:100%;margin-top:8px">Forget saved folder</button>
     <p class="hint cal-hint">Fingerprints stay until you clear them. Forgetting the folder does not delete stored fingerprints.</p>
     <button type="button" class="btn" id="btnForgetFingerprints" style="width:100%;margin-top:8px">Clear stored fingerprints</button>
   </details>
 
-  <p class="ver mono" id="appVer">v1.4.6</p>
+  <p class="ver mono" id="appVer">v1.4.7</p>
 
   <div class="bottom-bar">
     <button type="button" class="btn primary" id="btnMain" disabled>Back me up</button>
@@ -436,7 +443,7 @@
 
   <script>
     const $ = id => document.getElementById(id);
-    const APP_VER = '1.4.6';
+    const APP_VER = '1.4.7';
 
     const ENVELOPE_RATE = 20;
     const LISTEN_MS = 50;
@@ -451,6 +458,7 @@
     const MIN_LOCK_CLIPS = 2;
     const MIN_CLIP_COVERAGE = 0.28;
     const MIN_CLIP_CONTRAST = 4;
+    const MIN_GAP_SCORE = 0.62;
     const MAX_CLOCK_DRIFT = 1.25;
     const RECENT_SPEECH_MS = 2500;
     const HOLD_CONTINUE_RATIO = 0.7;
@@ -487,7 +495,8 @@
         fingerprintSec: 30,
         clipSec: 4,
         matchThreshold: 0.5,
-        confirmHoldMs: 5000
+        confirmHoldMs: 5000,
+        patternBlurMs: 150
       }
     };
 
@@ -546,6 +555,8 @@
     let lastClipHashes = 0;
     let lastClipLooked = 0;
     let lastClipFail = '';
+    let lastClipGapScore = 0;
+    let lastClipGapBit = '';
     let lastHitOffset = 0;
     let lastHitPerf = 0;
     let hitStreak = 0;
@@ -651,6 +662,7 @@
           clipSec: state.settings.clipSec,
           matchThreshold: state.settings.matchThreshold,
           confirmHoldMs: state.settings.confirmHoldMs,
+          patternBlurMs: state.settings.patternBlurMs,
           silenceManual: !!silenceManual
         }).catch(() => {});
       }, 200);
@@ -672,6 +684,8 @@
       $('matchThresholdVal').textContent = s.matchThreshold.toFixed(2);
       $('confirmHold').value = String(s.confirmHoldMs);
       $('confirmHoldVal').textContent = fmtSettingMs(s.confirmHoldMs);
+      $('patternBlur').value = String(s.patternBlurMs);
+      $('patternBlurVal').textContent = Math.round(s.patternBlurMs) + ' ms';
       updateCalibratorUi();
     }
 
@@ -687,6 +701,7 @@
         if (saved.clipSec != null) s.clipSec = clampSetting(saved.clipSec, 2, 8);
         if (saved.matchThreshold != null) s.matchThreshold = clampSetting(saved.matchThreshold, 0.25, 0.85);
         if (saved.confirmHoldMs != null) s.confirmHoldMs = clampSetting(saved.confirmHoldMs, 3000, 10000);
+        if (saved.patternBlurMs != null) s.patternBlurMs = clampSetting(saved.patternBlurMs, 0, 400);
         if (saved.silenceManual) silenceManual = true;
         applySettingsToUi();
       } catch (err) {
@@ -740,6 +755,7 @@
       const fpEnd = Math.min(fileEnvelope.length, Math.ceil(state.settings.fingerprintSec * ENVELOPE_RATE));
       startBursts = extractBursts(fileEnvelope, fileSpeechThreshold, 0, fpEnd);
       templateIndex = unpackTemplate(row);
+      updatePatternBlurHint();
     }
 
     async function fpLoad(file) {
@@ -1024,7 +1040,8 @@
         if (lastClipStatus === 'waiting') return 'Waiting for audio above the silence gate, then a ' + state.settings.clipSec + ' s clip';
         const matchPct = Math.round(lastMatchScore * 100);
         const clipBit = 'clip ' + matchPct + '% · ' + lastClipHits + ' hits · ×' +
-          lastClipContrast.toFixed(1) + ' · ' + Math.round(lastClipCoverage * 100) + '% cover';
+          lastClipContrast.toFixed(1) + ' · ' + Math.round(lastClipCoverage * 100) + '% cover' +
+          (lastClipGapBit ? ' · ' + lastClipGapBit : '');
         if (confirmStartedAt) {
           const needMs = state.settings.confirmHoldMs;
           const holdBit = 'hold ' + (confirmHeldMs / 1000).toFixed(1) + ' / ' + (needMs / 1000).toFixed(1) + ' s';
@@ -1450,6 +1467,112 @@
       return Math.max(120, Math.round(state.settings.clipSec * 30));
     }
 
+    function envelopeFromPcm(samples, sampleRate) {
+      const win = Math.max(1, Math.floor(sampleRate / ENVELOPE_RATE));
+      const len = Math.ceil(samples.length / win);
+      const env = new Float32Array(len);
+      for (let i = 0; i < len; i++) {
+        let sum = 0;
+        const start = i * win;
+        const end = Math.min(start + win, samples.length);
+        for (let j = start; j < end; j++) sum += samples[j] * samples[j];
+        env[i] = Math.sqrt(sum / Math.max(1, end - start));
+      }
+      return env;
+    }
+
+    function dilateBool(mask, radius) {
+      const n = mask.length;
+      const out = new Array(n).fill(false);
+      if (radius <= 0) {
+        for (let i = 0; i < n; i++) out[i] = !!mask[i];
+        return out;
+      }
+      for (let i = 0; i < n; i++) {
+        if (!mask[i]) continue;
+        const a = Math.max(0, i - radius);
+        const b = Math.min(n - 1, i + radius);
+        for (let j = a; j <= b; j++) out[j] = true;
+      }
+      return out;
+    }
+
+    function typicalFileGapSec() {
+      const bursts = startBursts.length ? startBursts : fileBursts;
+      if (!bursts || bursts.length < 2) return 0;
+      const gaps = [];
+      for (let i = 1; i < bursts.length; i++) {
+        const g = bursts[i].start - bursts[i - 1].end;
+        if (g >= 0.15 && g <= 4) gaps.push(g);
+      }
+      if (!gaps.length) return 0;
+      gaps.sort((a, b) => a - b);
+      return gaps[Math.floor(gaps.length / 2)];
+    }
+
+    function suggestedPatternBlurMs() {
+      const gap = typicalFileGapSec();
+      if (!gap) return 150;
+      return clampSetting(Math.round(gap * 250), 50, 250);
+    }
+
+    function updatePatternBlurHint() {
+      const el = $('patternBlurHint');
+      if (!el) return;
+      const gap = typicalFileGapSec();
+      const suggest = suggestedPatternBlurMs();
+      const base = 'Second layer: quiet gaps in the file must also be quiet on the mic. Blur forgives early/late burst edges. Raise if the real amp barely misses; lower if talking still hits.';
+      if (!gap) {
+        el.textContent = base + ' This file has no clear pauses — gap check stays off until pauses exist.';
+        return;
+      }
+      el.textContent = base + ' This file’s typical pause is ~' + Math.round(gap * 1000) +
+        ' ms (suggested blur ' + suggest + ' ms).';
+    }
+
+    function scoreSilencePattern(samples, sampleRate, offsetSec) {
+      const blurMs = state.settings.patternBlurMs;
+      const empty = {
+        gapUsable: false, gapScore: 1, gapAgree: 0, gapBins: 0, gapQuiet: 0, gapBlurMs: blurMs
+      };
+      if (!fileEnvelope || !fileEnvelope.length || !samples || !samples.length) return empty;
+      const micEnv = envelopeFromPcm(samples, sampleRate);
+      const i0 = Math.max(0, Math.round(offsetSec * ENVELOPE_RATE));
+      const n = Math.min(micEnv.length, Math.max(0, fileEnvelope.length - i0));
+      if (n < 8) return empty;
+      const filePeak = peakOfRange(fileEnvelope, i0, i0 + n) || 0.001;
+      let micPeak = 0.001;
+      for (let i = 0; i < n; i++) if (micEnv[i] > micPeak) micPeak = micEnv[i];
+      const fileThresh = Math.max(fileSpeechThreshold || 0, filePeak * 0.22);
+      const micThresh = Math.max(state.settings.silenceThreshold, micPeak * 0.28);
+      const fileSpeech = new Array(n);
+      const micSpeech = new Array(n);
+      for (let i = 0; i < n; i++) {
+        fileSpeech[i] = fileEnvelope[i0 + i] > fileThresh;
+        micSpeech[i] = micEnv[i] > micThresh;
+      }
+      const blurBins = Math.round((blurMs / 1000) * ENVELOPE_RATE);
+      const fileSpeechWide = dilateBool(fileSpeech, blurBins);
+      let gapBins = 0, quiet = 0, agree = 0;
+      const micSpeechWide = dilateBool(micSpeech, blurBins);
+      for (let i = 0; i < n; i++) {
+        if (fileSpeechWide[i] === micSpeechWide[i]) agree++;
+        if (!fileSpeechWide[i]) {
+          gapBins++;
+          if (!micSpeech[i]) quiet++;
+        }
+      }
+      const gapUsable = gapBins >= 4;
+      return {
+        gapUsable,
+        gapScore: gapUsable ? quiet / gapBins : 1,
+        gapAgree: agree / n,
+        gapBins,
+        gapQuiet: quiet,
+        gapBlurMs: blurMs
+      };
+    }
+
     function judgeClip(result) {
       const needHits = minPeakHits();
       const needScore = scoreNeedHits();
@@ -1468,6 +1591,10 @@
         reasons.push('cover ' + Math.round(coverage * 100) + '% at offset < ' +
           Math.round(MIN_CLIP_COVERAGE * 100) + '%');
       }
+      if (result.gapUsable && result.gapScore < MIN_GAP_SCORE) {
+        reasons.push('gaps ' + Math.round(result.gapScore * 100) + '% quiet in file pauses < ' +
+          Math.round(MIN_GAP_SCORE * 100) + '% (blur ' + Math.round(result.gapBlurMs || 0) + ' ms)');
+      }
       if ((result.hashes || 0) < 8) reasons.push('too few peaks in clip');
       return { ok: reasons.length === 0, reasons, needHits, needScore, coverage };
     }
@@ -1483,6 +1610,8 @@
       return 'Hit needs score ≥ ' + state.settings.matchThreshold.toFixed(2) +
         ' (~' + scoreHits + ' peak-hits) · ≥ ' + needHits + ' hits · ×' + MIN_CLIP_CONTRAST +
         ' contrast · ' + Math.round(MIN_CLIP_COVERAGE * 100) + '% cover at the matched time · ' +
+        'file pauses ≥ ' + Math.round(MIN_GAP_SCORE * 100) + '% quiet on mic (blur ' +
+        Math.round(state.settings.patternBlurMs) + ' ms) · ' +
         MIN_LOCK_CLIPS + ' clips in a row that follow the file clock · ' +
         (state.settings.confirmHoldMs / 1000).toFixed(1) + ' s hold';
     }
@@ -1544,7 +1673,8 @@
           fingerprintSec: state.settings.fingerprintSec,
           clipSec: state.settings.clipSec,
           matchThreshold: state.settings.matchThreshold,
-          confirmHoldMs: state.settings.confirmHoldMs
+          confirmHoldMs: state.settings.confirmHoldMs,
+          patternBlurMs: state.settings.patternBlurMs
         }),
         'hold=' + (confirmHeldMs / 1000).toFixed(1) + 's streak=' + hitStreak +
           ' lastFail=' + (lastClipFail || 'none'),
@@ -1765,7 +1895,8 @@
           if (wasSpot) applySpotMatch(samples, sr, spotStart, need / sr * 1000);
           else {
             const result = matchClipToTemplate(samples, sr, templateIndex);
-            applyClipMatch(result, need / sr * 1000);
+            const pattern = scoreSilencePattern(samples, sr, result.offsetSec);
+            applyClipMatch(Object.assign(result, pattern), need / sr * 1000);
           }
         } finally {
           clipBusy = false;
@@ -1795,6 +1926,11 @@
       lastClipHashes = result.hashes || 0;
       lastClipLooked = result.looked || 0;
       lastMatchGated = false;
+      lastClipGapScore = result.gapUsable ? result.gapScore : 0;
+      lastClipGapBit = result.gapUsable
+        ? ('gaps ' + Math.round(result.gapScore * 100) + '% (' + result.gapQuiet + '/' +
+          result.gapBins + ' quiet, blur ' + Math.round(result.gapBlurMs || 0) + ' ms)')
+        : 'gaps n/a';
       const coverPct = Math.round(judged.coverage * 100);
       const anyPct = Math.round((result.anyCover || 0) * 100);
       const uniqBit = result.second ? (' · uniq ×' + result.uniq.toFixed(1)) : '';
@@ -1803,7 +1939,7 @@
       const base = 'score ' + result.score.toFixed(2) +
         ' · ' + result.hits + ' hits · ×' + lastClipContrast.toFixed(1) + uniqBit + idfBit + postBit +
         ' · cover ' + coverPct + '% at (' + lastClipLooked + '/' + lastClipHashes +
-        ') · ' + anyPct + '% any · @ ' +
+        ') · ' + anyPct + '% any · ' + lastClipGapBit + ' · @ ' +
         fmtTime(result.offsetSec) + clockNote;
       if (judged.ok) {
         lastClipStatus = 'hit';
@@ -2443,6 +2579,8 @@
         lastClipContrast = 0;
         lastClipCoverage = 0;
         lastClipFail = '';
+        lastClipGapScore = 0;
+        lastClipGapBit = '';
         hitStreak = 0;
         lastHitOffset = 0;
         lastHitPerf = 0;
@@ -2642,6 +2780,19 @@
       state.settings.confirmHoldMs = +e.target.value;
       $('confirmHoldVal').textContent = fmtSettingMs(state.settings.confirmHoldMs);
       scheduleSaveSettings();
+    });
+    $('patternBlur').addEventListener('input', e => {
+      state.settings.patternBlurMs = +e.target.value;
+      $('patternBlurVal').textContent = Math.round(state.settings.patternBlurMs) + ' ms';
+      scheduleSaveSettings();
+    });
+    $('btnBlurFromFile').addEventListener('click', () => {
+      const ms = suggestedPatternBlurMs();
+      state.settings.patternBlurMs = ms;
+      $('patternBlur').value = String(ms);
+      $('patternBlurVal').textContent = ms + ' ms';
+      scheduleSaveSettings();
+      updatePatternBlurHint();
     });
 
     if ('serviceWorker' in navigator) {
