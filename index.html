@@ -3817,7 +3817,10 @@
       if (!backupAudio) return;
       if (pendingPlayTimer) { clearTimeout(pendingPlayTimer); pendingPlayTimer = null; }
       backupAudio.volume = 1;
-      backupAudio.currentTime = Math.max(0, backupPosition());
+      const seekSec = armKind === 'manual'
+        ? Math.max(0, roomPosition() - effectiveTrailMs() / 1000)
+        : Math.max(0, backupPosition());
+      backupAudio.currentTime = seekSec;
       await backupAudio.play();
       setMode('backing');
 
