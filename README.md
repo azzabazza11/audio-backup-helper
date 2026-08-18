@@ -21,12 +21,13 @@ Open **http://localhost:8080/** in Chrome. Mic access requires HTTPS in producti
 
 1. **Load audio folder** — pick the folder of lesson / instruction audio files. Chrome remembers the folder on this phone; fingerprints of each track are stored locally so the next arm is instant.
 2. **Select track** — tap the file that is (or will be) playing on the main amp. A green **fp** mark means that track’s fingerprint is already saved.
-3. **Back me up** — from the **first sound** in the file (leading silence is skipped), the next 15–30 s (default 30) is turned into a **peak-hash fingerprint**. The two-row diagram shows that fingerprint vs the **current mic clip** only (replaced each clip). Heard is placed on the file timeline at the clip’s best match.
-4. When the mic hears sound, the app records a clip and scores it with **rare hashes** (common speech hashes are down-weighted) and coverage **among hashes that exist in the file**, plus a **silence-pattern** check. Talking / other audio should show **MISS** with a reason. The real file should show **HIT** by a wide margin. Lock needs **two hits in a row** that **advance with the file clock** (clip time and wall time stay within 1.25 s) plus the hold time. A clip log on screen lists every attempt.
-5. The backup file sits **behind** the amp by the buffer delay (`backup = room − buffer`). Confirm time is added to the room clock first, then the full buffer is subtracted — the file is never skipped forward. If that would be before 0:00, playback stays paused until the buffer has elapsed.
-6. After lock, the clock shows the **backup** position. Take-over jumps to the amp/room position (where it cut out).
-7. **Pauses in the lesson do not trigger cutout** while the file also has a pause at that spot. Brief mic blips under ~1.2 s do not reset the quiet timer. After **Keep listening**, the app records a verify clip and pauses cutout until sync is confirmed.
-8. Tap **Take Over** to continue from the synced spot. **Stop** pauses the backup speaker but keeps listening: clips are matched in a ±30 s window around that file time (the window also slides forward with the clock) so the amp can be re-locked if it comes back.
+3. **Back me up** — **Tap** to start the track on this phone right away (manual mode). The mic listens in the background and locks on when it matches the amp; trail time is then measured and shown. **Hold** the button for auto lock-on: backup stays silent, trailing the amp by the trail delay, until two matching clips confirm lock (same as before).
+4. **Trail time** — on the main screen while active: **−** / **+** adjust how far backup trails the amp (0.5 s steps; hold for faster). In manual mode, lock sets trail from the measured gap; you can nudge it after.
+5. When the mic hears sound, the app records a clip and scores it with **rare hashes** (common speech hashes are down-weighted) and coverage **among hashes that exist in the file**, plus a **silence-pattern** check. Talking / other audio should show **MISS** with a reason. The real file should show **HIT** by a wide margin. Lock needs **two hits in a row** that **advance with the file clock** (clip time and wall time stay within 1.25 s) plus the hold time. A clip log on screen lists every attempt (Debug).
+6. The backup file sits **behind** the amp by the trail delay (`backup = room − trail`). Confirm time is added to the room clock first, then the full trail is subtracted — the file is never skipped forward. If that would be before 0:00, playback stays paused until the trail has elapsed.
+7. After lock, the clock shows **amp** and **backup** positions (backup trails by the trail). Take-over jumps to the amp/room position (where it cut out).
+8. **Pauses in the lesson do not trigger cutout** while the file also has a pause at that spot. Brief mic blips under ~1.2 s do not reset the quiet timer. After **Keep listening**, the app records a verify clip and pauses cutout until sync is confirmed.
+9. Tap **Take Over** to continue from the synced spot. **Stop** pauses the backup speaker but keeps listening: clips are matched in a ±30 s window around that file time (the window also slides forward with the clock) so the amp can be re-locked if it comes back.
 
 Settings (buffer, clip length, match score, and so on) are saved on this phone.
 
@@ -40,4 +41,4 @@ Install from Chrome (**Install** / Add to Home screen). Works offline for the ap
 2. Tap **Install** (or menu → Add to Home screen)
 3. Stuck on an old build? force-reload or clear site data
 
-Version: **1.5.3**
+Version: **1.5.4**

@@ -198,6 +198,33 @@
       font-size: 0.78rem; color: var(--muted);
       margin-top: 2px;
     }
+    .trail-row {
+      display: flex; align-items: center; justify-content: center; gap: 10px;
+      margin-top: 12px; padding: 10px 12px;
+      background: var(--bg); border: 1px solid var(--line);
+      border-radius: 14px;
+    }
+    .trail-label {
+      font-size: 0.78rem; font-weight: 600; color: var(--muted);
+      text-transform: uppercase; letter-spacing: 0.04em;
+      margin-right: 4px;
+    }
+    .trail-btn {
+      min-width: 44px; min-height: 44px; padding: 0;
+      border-radius: 12px; border: 1px solid var(--line);
+      background: var(--paper); font-size: 1.35rem; line-height: 1;
+      color: var(--accent); font-weight: 600;
+      touch-action: manipulation; user-select: none;
+    }
+    .trail-btn:active { background: var(--bg); }
+    .trail-val {
+      min-width: 4.5em; text-align: center;
+      font-size: 1.05rem; font-weight: 600; color: var(--ink);
+    }
+    .bottom-hint {
+      margin: 0 0 8px; text-align: center;
+      font-size: 0.78rem; color: var(--muted);
+    }
     .confidence {
       margin-top: 10px;
       padding: 10px 12px;
@@ -476,6 +503,12 @@
         <div class="clock-total mono" id="timeTotalDual">Track length —</div>
       </div>
     </div>
+    <div class="trail-row" id="trailRow" hidden>
+      <span class="trail-label">Trail</span>
+      <button type="button" class="trail-btn" id="btnTrailDown" aria-label="Decrease trail time">−</button>
+      <span class="mono trail-val" id="trailVal">1.5 s</span>
+      <button type="button" class="trail-btn" id="btnTrailUp" aria-label="Increase trail time">+</button>
+    </div>
     <div class="mic-meter" id="micMeterWrap" hidden>
       <div class="mic-meter-fill" id="micMeterFill"></div>
       <div class="mic-meter-mark" id="micMeterMark"></div>
@@ -569,9 +602,10 @@
     <button type="button" class="btn" id="btnForgetFingerprints" style="width:100%;margin-top:8px">Clear stored fingerprints</button>
   </details>
 
-  <p class="ver mono" id="appVer">v1.5.3</p>
+  <p class="ver mono" id="appVer">v1.5.4</p>
 
   <div class="bottom-bar">
+    <p class="bottom-hint" id="mainBtnHint">Tap — start track now · Hold — auto lock-on</p>
     <button type="button" class="btn primary" id="btnMain" disabled>Back me up</button>
   </div>
 
@@ -586,9 +620,11 @@
 
   <script>
     const $ = id => document.getElementById(id);
-    const APP_VER = '1.5.3';
+    const APP_VER = '1.5.4';
 
-    const ENVELOPE_RATE = 20;
+    const TRAIL_STEP_MS = 500;
+    const TRAIL_HOLD_STEP_MS = 2500;
+    const LONG_PRESS_MS = 550;
     const LISTEN_MS = 50;
     const MIN_BURST_SEC = 0.18;
     const MIN_LOCK_SPEECH_SEC = 0.4;
@@ -742,6 +778,9 @@
     let fpGen = 0;
     let showDebug = false;
     let settingsLocked = false;
+    let armKind = null;
+    let mainLongPress = false;
+    let mainPressTimer = null;
     const fpInflight = new Map();
 
     function fmtTime(sec) {
@@ -838,6 +877,7 @@
       const s = state.settings;
       $('bufferDelay').value = String(s.bufferDelayMs);
       $('bufferDelayVal').textContent = fmtSettingMs(s.bufferDelayMs);
+      updateTrailUi();
       $('silenceThreshold').value = String(s.silenceThreshold);
       $('silenceThresholdVal').textContent = s.silenceThreshold.toFixed(3);
       $('silenceDuration').value = String(s.silenceDurationMs);
@@ -1216,6 +1256,79 @@
       lastHitPerf = 0;
     }
 
+    function isClipMatchMode() {
+      return state.mode === 'primed' || state.mode === 'manual' || state.mode === 'seeking';
+    }
+
+    function showsTrailRow() {
+      return state.mode === 'primed' || state.mode === 'manual' || state.mode === 'armed' ||
+        state.mode === 'cutout' || state.mode === 'seeking' || state.mode === 'backing';
+    }
+
+    function effectiveTrailMs() {
+      if (trackingLocked && lockedBufferMs) return lockedBufferMs;
+      return state.settings.bufferDelayMs;
+    }
+
+    function updateTrailUi() {
+      const row = $('trailRow');
+      const val = $('trailVal');
+      if (!row || !val) return;
+      const show = showsTrailRow();
+      row.hidden = !show;
+      if (!show) return;
+      const ms = effectiveTrailMs();
+      val.textContent = (ms / 1000).toFixed(1) + ' s';
+    }
+
+    function syncBufferDelayUi() {
+      $('bufferDelay').value = String(state.settings.bufferDelayMs);
+      $('bufferDelayVal').textContent = fmtSettingMs(state.settings.bufferDelayMs);
+      updateTrailUi();
+    }
+
+    function applyTrailToPlayback() {
+      if (!backupAudio || !trackingLocked) return;
+      const room = roomPosition();
+      const target = Math.max(0, room - lockedBufferMs / 1000);
+      if (Math.abs(backupAudio.currentTime - target) > 0.12) {
+        backupAudio.currentTime = target;
+      }
+    }
+
+    function adjustTrail(deltaMs) {
+      const next = clampSetting(state.settings.bufferDelayMs + deltaMs, 500, 30000);
+      if (next === state.settings.bufferDelayMs && (!trackingLocked || lockedBufferMs === next)) return;
+      state.settings.bufferDelayMs = next;
+      if (trackingLocked) lockedBufferMs = next;
+      syncBufferDelayUi();
+      applyTrailToPlayback();
+      scheduleSaveSettings();
+    }
+
+    function bindTrailHold(btn, deltaMs, holdDeltaMs) {
+      let holdTimer = null;
+      let repeatTimer = null;
+      const stop = () => {
+        clearTimeout(holdTimer);
+        clearInterval(repeatTimer);
+        holdTimer = null;
+        repeatTimer = null;
+      };
+      const start = e => {
+        e.preventDefault();
+        adjustTrail(deltaMs);
+        stop();
+        holdTimer = setTimeout(() => {
+          repeatTimer = setInterval(() => adjustTrail(holdDeltaMs), 80);
+        }, 400);
+      };
+      btn.addEventListener('pointerdown', start);
+      btn.addEventListener('pointerup', stop);
+      btn.addEventListener('pointerleave', stop);
+      btn.addEventListener('pointercancel', stop);
+    }
+
     function syncLineText() {
       if (state.analysing) return 'Building a Shazam-style fingerprint of the first ' + state.settings.fingerprintSec + ' s…';
       if (state.mode === 'primed') {
@@ -1269,12 +1382,28 @@
         return line;
       }
       if (state.mode === 'cutout') return 'Mic quiet where the file still has speech — Take over at the amp position';
+      if (state.mode === 'manual') {
+        const trailSec = effectiveTrailMs() / 1000;
+        if (!trackingLocked) {
+          if (clipCollecting) return 'Playing · recording clip to match the file…';
+          if (confirmStartedAt) {
+            return 'Playing · matching ' + (confirmHeldMs / 1000).toFixed(1) + ' / ' +
+              (state.settings.confirmHoldMs / 1000).toFixed(1) + ' s · trail preset ' +
+              trailSec.toFixed(1) + ' s';
+          }
+          if (lastClipStatus === 'miss') return 'Playing · last clip missed · trail preset ' + trailSec.toFixed(1) + ' s';
+          return 'Playing · listening for a match · trail preset ' + trailSec.toFixed(1) + ' s';
+        }
+        let line = 'Playing · locked · trail ' + trailSec.toFixed(1) + ' s';
+        if (lastSpotStatus) line += ' · ' + lastSpotStatus;
+        return line;
+      }
       return '';
     }
 
     function showDualClock() {
       return trackingLocked &&
-        (state.mode === 'armed' || state.mode === 'cutout' || state.mode === 'backing');
+        (state.mode === 'armed' || state.mode === 'manual' || state.mode === 'cutout' || state.mode === 'backing');
     }
 
     function updateProgressDisplay() {
@@ -1311,6 +1440,7 @@
 
       let pos = trackedPosition;
       if (state.mode === 'backing' && backupAudio) pos = backupAudio.currentTime;
+      else if (state.mode === 'manual' && backupAudio) pos = backupAudio.currentTime;
       else if (state.mode === 'seeking') pos = seekWindow().center;
       else if (state.mode === 'primed' && confirmStartedAt) pos = lastClipOffset;
       $('timeCurrent').textContent = fmtTime(pos);
@@ -1334,14 +1464,36 @@
       const pill = $('statusPill');
       pill.className = 'status-pill';
       const btn = $('btnMain');
-      const showMic = state.mode === 'primed' || state.mode === 'armed' ||
+      const hint = $('mainBtnHint');
+      const showMic = state.mode === 'primed' || state.mode === 'manual' || state.mode === 'armed' ||
         state.mode === 'cutout' || state.mode === 'seeking';
+      if (hint) hint.hidden = state.mode !== 'idle';
 
       if (state.mode === 'idle') {
         $('statusText').textContent = hasSelection ? 'Ready' : 'Select a track';
         btn.textContent = 'Back me up';
         btn.className = 'btn primary';
         btn.disabled = !hasSelection;
+      } else if (state.mode === 'manual') {
+        pill.classList.add('playing');
+        if (state.analysing) {
+          $('statusText').textContent = 'Starting track…';
+        } else if (clipCollecting) {
+          $('statusText').textContent = 'Playing · recording clip';
+        } else if (trackingLocked) {
+          $('statusText').textContent = 'Playing · locked on amp';
+        } else if (confirmStartedAt) {
+          const held = (confirmHeldMs / 1000).toFixed(1);
+          const need = (state.settings.confirmHoldMs / 1000).toFixed(1);
+          $('statusText').textContent = 'Playing · matching ' + held + ' / ' + need + ' s';
+        } else if (lastClipStatus === 'miss') {
+          $('statusText').textContent = 'Playing · clip missed';
+        } else {
+          $('statusText').textContent = 'Playing · listening for match';
+        }
+        btn.textContent = 'Stop';
+        btn.className = 'btn danger';
+        btn.disabled = false;
       } else if (state.mode === 'primed') {
         pill.classList.add('waiting');
         if (state.analysing) {
@@ -1357,7 +1509,7 @@
         } else if (lastClipStatus === 'miss') {
           $('statusText').textContent = 'Clip missed';
         } else {
-          $('statusText').textContent = 'Waiting for a clip';
+          $('statusText').textContent = 'Auto · waiting for a clip';
         }
         btn.textContent = 'Cancel';
         btn.className = 'btn';
@@ -1402,13 +1554,14 @@
       renderTriggerLog();
 
       $('btnLoadFolder').disabled = state.mode !== 'idle' && state.mode !== 'backing';
-      const locked = state.mode === 'primed' || state.mode === 'armed' ||
+      const locked = state.mode === 'primed' || state.mode === 'manual' || state.mode === 'armed' ||
         state.mode === 'cutout' || state.mode === 'seeking';
       document.querySelectorAll('.track-list li').forEach(li => {
         li.style.pointerEvents = locked ? 'none' : '';
         li.style.opacity = locked ? '0.65' : '';
       });
       $('cutoutOverlay').classList.toggle('show', state.mode === 'cutout');
+      updateTrailUi();
       updateProgressDisplay();
     }
 
@@ -1433,7 +1586,7 @@
     }
 
     function selectTrack(id) {
-      if (state.mode === 'primed' || state.mode === 'armed' || state.mode === 'cutout') return;
+      if (state.mode === 'primed' || state.mode === 'manual' || state.mode === 'armed' || state.mode === 'cutout') return;
       state.selectedId = id;
       renderTrackList();
       saveLibraryMeta();
@@ -1534,7 +1687,7 @@
       const hint = $('calHint');
       if (hint) {
         if (silenceManual) hint.textContent = 'Gate locked and saved on this phone. Drag the slider to change it.';
-        else if (state.mode === 'primed' && !confirmStartedAt) {
+        else if ((state.mode === 'primed' || state.mode === 'manual') && !confirmStartedAt) {
           hint.textContent = 'Room ' + live.toFixed(3) + ' · floor ' + ambientRms.toFixed(3) + ' · gate ' + gate.toFixed(3) + ' (auto)';
         } else {
           hint.textContent = 'Green = mic level now. Orange mark = silence gate. Auto-sets while waiting; drag the slider to lock it.';
@@ -1544,7 +1697,8 @@
 
     function maybeAutoCalibrateSilence() {
       if (silenceManual) return;
-      if (state.mode !== 'primed' || state.analysing || confirmStartedAt) return;
+      if (state.mode !== 'primed' && state.mode !== 'manual') return;
+      if (state.analysing || confirmStartedAt) return;
       if (ambientRing.length < 20) return;
       const next = suggestedSilenceGate();
       if (Math.abs(next - state.settings.silenceThreshold) >= 0.005) setSilenceThreshold(next);
@@ -1963,21 +2117,23 @@
       if (state.mode === 'cutout') return Math.min(0.28, clipQ * 0.4);
       if (state.mode === 'backing') return Math.max(clipQ, trackingLocked ? 0.7 : clipQ);
       if (state.mode === 'primed' && lastClipStatus === 'waiting' && !confirmStartedAt) return 0;
+      if (state.mode === 'manual' && !trackingLocked && lastClipStatus === 'waiting' && !confirmStartedAt) return 0.15;
       if (state.mode === 'seeking' && lastClipStatus === 'waiting' && !confirmStartedAt) return 0;
 
-      const live = (state.mode === 'armed' || state.mode === 'seeking') ? liveSpeechAgree() : null;
+      const live = (state.mode === 'armed' || state.mode === 'manual' || state.mode === 'seeking')
+        ? liveSpeechAgree() : null;
       let liveQ = live ? live.score : clipQ;
       if (live && live.pause) liveQ = Math.max(liveQ, clipQ * 0.9);
 
       let q;
-      if (trackingLocked && state.mode === 'armed') {
+      if (trackingLocked && (state.mode === 'armed' || state.mode === 'manual')) {
         q = 0.55 * clipQ + 0.45 * liveQ;
         if (lastSpotStatus && lastSpotStatus.indexOf('weak') >= 0) q *= 0.82;
         if (lastSpotStatus && (lastSpotStatus.indexOf('OK') >= 0 || lastSpotStatus.indexOf('confirmed') >= 0)) {
           q = Math.min(1, q * 1.06);
         }
-        if (unexpectedSilenceMs < 400) q = Math.max(q, 0.58);
-        if (unexpectedSilenceMs > 200) {
+        if (state.mode === 'armed' && unexpectedSilenceMs < 400) q = Math.max(q, 0.58);
+        if (state.mode === 'armed' && unexpectedSilenceMs > 200) {
           const sil = Math.min(1, unexpectedSilenceMs / Math.max(1, state.settings.silenceDurationMs));
           q *= 1 - 0.55 * sil;
         }
@@ -1996,7 +2152,7 @@
       const pctEl = $('clipConfPct');
       const meter = $('clipConfMeter');
       if (!fill || !pctEl) return;
-      const live = state.mode === 'primed' || state.mode === 'armed' ||
+      const live = state.mode === 'primed' || state.mode === 'manual' || state.mode === 'armed' ||
         state.mode === 'cutout' || state.mode === 'seeking' || state.mode === 'backing';
       if (!live) {
         fill.style.width = '0%';
@@ -2059,7 +2215,7 @@
     function renderTriggerLog() {
       const box = $('triggerBox');
       if (!box) return;
-      const live = state.mode === 'primed' || state.mode === 'armed' ||
+      const live = state.mode === 'primed' || state.mode === 'manual' || state.mode === 'armed' ||
         state.mode === 'cutout' || state.mode === 'seeking' || state.mode === 'backing';
       const show = live || (showDebug && clipLog.length > 0);
       box.hidden = !show;
@@ -2095,7 +2251,9 @@
       if (!showDebug) {
         if (state.mode === 'cutout') v.textContent = 'Lost — mic quiet where the file still has speech';
         else if (state.mode === 'backing') v.textContent = 'Playing backup';
-        else if (state.mode === 'armed') v.textContent = trackingLocked ? 'Locked on the amp' : 'Listening';
+        else if (state.mode === 'manual') {
+          v.textContent = trackingLocked ? 'Playing · locked on amp' : 'Playing · matching in background';
+        } else if (state.mode === 'armed') v.textContent = trackingLocked ? 'Locked on the amp' : 'Listening';
         else if (state.mode === 'seeking') {
           v.textContent = confirmStartedAt ? 'Amp heard — confirming lock' : 'Watching for the amp';
         } else if (confirmStartedAt) {
@@ -2304,7 +2462,7 @@
       captureNode.connect(captureGain);
       captureGain.connect(Ctx.destination);
       captureNode.onaudioprocess = ev => {
-        if (!clipCollecting || (state.mode !== 'primed' && state.mode !== 'armed' && state.mode !== 'seeking')) return;
+        if (!clipCollecting || (state.mode !== 'primed' && state.mode !== 'manual' && state.mode !== 'armed' && state.mode !== 'seeking')) return;
         const data = ev.inputBuffer.getChannelData(0);
         clipParts.push(new Float32Array(data));
         clipLength += data.length;
@@ -2335,8 +2493,8 @@
     }
 
     function beginClipIfNeeded(rms) {
-      if ((state.mode !== 'primed' && state.mode !== 'seeking') || state.analysing || clipCollecting || clipBusy) return;
-      if (state.mode === 'primed' && !templateIndex) return;
+      if (!isClipMatchMode() || state.analysing || clipCollecting || clipBusy) return;
+      if ((state.mode === 'primed' || state.mode === 'manual') && !templateIndex) return;
       if (state.mode === 'seeking' && !fileBuffer) return;
       if (rms <= state.settings.silenceThreshold) return;
       beginClipCollect();
@@ -2345,7 +2503,7 @@
     }
 
     function maybeSpotCheck(rms) {
-      if (state.mode !== 'armed' || !trackingLocked || !fileBuffer) return;
+      if ((state.mode !== 'armed' && state.mode !== 'manual') || !trackingLocked || !fileBuffer) return;
       if (clipCollecting || clipBusy) return;
       if (Date.now() < nextSpotAt) return;
       if (!fileExpectsSpeech) return;
@@ -2443,7 +2601,7 @@
         pushClipLog({
           kind: 'hit',
           at: Date.now(),
-          line: (state.mode === 'seeking' ? 'SEEK HIT ' : 'HIT  ') + base +
+          line: (state.mode === 'seeking' ? 'SEEK HIT ' : state.mode === 'manual' ? 'MAN HIT ' : 'HIT  ') + base +
             ' · streak ' + hitStreak + '/' + MIN_LOCK_CLIPS +
             ' · hold ' + (confirmHeldMs / 1000).toFixed(1) + 's'
         });
@@ -2454,7 +2612,7 @@
           pushClipLog({
             kind: 'lock',
             at: Date.now(),
-            line: (state.mode === 'seeking' ? 'SEEK LOCK ' : 'LOCK ') + lockReason
+            line: (state.mode === 'seeking' ? 'SEEK LOCK ' : state.mode === 'manual' ? 'MAN LOCK ' : 'LOCK ') + lockReason
           });
           activateSync(confirmPositionSec, 0);
           return;
@@ -2836,7 +2994,7 @@
 
     function fpScrollsWithTrack() {
       return trackingLocked &&
-        (state.mode === 'armed' || state.mode === 'cutout' || state.mode === 'backing');
+        (state.mode === 'armed' || state.mode === 'manual' || state.mode === 'cutout' || state.mode === 'backing');
     }
 
     function micFileTime(perfT) {
@@ -3022,7 +3180,7 @@
       const viz = $('fpViz');
       if (!viz) return;
       const show = showDebug &&
-        (state.mode === 'primed' || state.mode === 'armed' || state.mode === 'cutout' ||
+        (state.mode === 'primed' || state.mode === 'manual' || state.mode === 'armed' || state.mode === 'cutout' ||
           state.mode === 'seeking' || state.mode === 'backing') &&
         fileEnvelope && fileEnvelope.length;
       viz.hidden = !show;
@@ -3150,7 +3308,11 @@
       if (state.mode === 'backing' && backupAudio) {
         return backupAudio.currentTime;
       }
-      if (backupAudio && trackingLocked && !backupAudio.ended && !backupAudio.paused) {
+      if (state.mode === 'manual' && !trackingLocked && backupAudio) {
+        return backupAudio.currentTime;
+      }
+      if (backupAudio && trackingLocked && !backupAudio.ended && !backupAudio.paused &&
+          armKind !== 'manual' && state.mode !== 'manual') {
         return backupAudio.currentTime + lockedBufferMs / 1000;
       }
       if (trackingLocked && lockClockAt) {
@@ -3214,6 +3376,15 @@
       if (state.mode === 'primed') {
         beginClipIfNeeded(rms);
         tickPrimedViz();
+      } else if (state.mode === 'manual') {
+        beginClipIfNeeded(rms);
+        if (trackingLocked) {
+          maybeSpotCheck(rms);
+          const room = roomPosition();
+          trackedPosition = Math.max(0, room - lockedBufferMs / 1000);
+          fileExpectsSpeech = fileExpectsSpeechAt(room);
+        }
+        tickPrimedViz();
       } else if (state.mode === 'seeking') {
         beginClipIfNeeded(rms);
         tickPrimedViz();
@@ -3231,6 +3402,41 @@
 
     async function activateSync(fingerprintSec, confirmMs) {
       const roomNow = fingerprintSec + confirmMs / 1000;
+
+      if (armKind === 'manual') {
+        const backupNow = backupAudio ? backupAudio.currentTime : 0;
+        const computedTrail = Math.round(Math.max(500, Math.min(30000, (roomNow - backupNow) * 1000)));
+        lockedBufferMs = computedTrail;
+        state.settings.bufferDelayMs = computedTrail;
+        syncBufferDelayUi();
+        lockPositionSec = roomNow;
+        lockClockAt = Date.now();
+        trackingLocked = true;
+        trackedPosition = Math.max(0, roomNow - lockedBufferMs / 1000);
+        lastSpeechAt = Date.now();
+        silenceSince = null;
+        resetCutoutState();
+        resetConfirmHold();
+        inLogicalSync = true;
+        hasAlign = true;
+        alignPerfAt = performance.now() / 1000;
+        alignFileAt = roomNow;
+        spotChecksDone = 0;
+        nextSpotAt = Date.now() + SPOT_WAIT_MS;
+        lastSpotStatus = 'trail measured · spot check in ~1 min';
+        if (pendingPlayTimer) {
+          clearTimeout(pendingPlayTimer);
+          pendingPlayTimer = null;
+        }
+        if (backupAudio) {
+          backupAudio.volume = 1;
+          if (backupAudio.paused) await backupAudio.play().catch(() => {});
+        }
+        setMode('manual');
+        updateUI();
+        return;
+      }
+
       const trailMs = state.settings.bufferDelayMs;
       lockPositionSec = roomNow;
       lockClockAt = Date.now();
@@ -3344,6 +3550,7 @@
     }
 
     function checkCutout() {
+      if (armKind === 'manual') return;
       if (cutoutVerifyPending) return;
       if (Date.now() < cutoutCooldownUntil) return;
       if (!fileExpectsSpeech) return;
@@ -3370,9 +3577,10 @@
       }
     }
 
-    async function prime() {
+    async function prime(kind) {
       const track = selectedTrack();
       if (!track) return;
+      armKind = kind || 'auto';
 
       try {
         ensureAudioCtx();
@@ -3384,7 +3592,7 @@
         fileBursts = [];
         startBursts = [];
         state.analysing = true;
-        setMode('primed');
+        setMode(armKind === 'manual' ? 'manual' : 'primed');
 
         micStream = await navigator.mediaDevices.getUserMedia({
           audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
@@ -3453,6 +3661,12 @@
         if (pendingPlayTimer) { clearTimeout(pendingPlayTimer); pendingPlayTimer = null; }
 
         state.analysing = false;
+        if (armKind === 'manual') {
+          backupAudio.volume = 1;
+          backupAudio.currentTime = 0;
+          await backupAudio.play().catch(() => {});
+          backupAudio.onended = () => disarm(true);
+        }
         renderTrackList();
         updateUI();
         if (!fileBuffer && track.file) {
@@ -3523,6 +3737,7 @@
       lockClockAt = 0;
       lockedBufferMs = 0;
       trackingLocked = false;
+      armKind = null;
       setMode('idle');
       updateProgressDisplay();
     }
@@ -3574,11 +3789,33 @@
     $('btnCopyLog').addEventListener('click', () => copyDiagnostics());
     $('btnShareLog').addEventListener('click', () => shareDiagnostics());
 
+    $('btnMain').addEventListener('pointerdown', e => {
+      if (state.mode !== 'idle' || $('btnMain').disabled) return;
+      mainLongPress = false;
+      clearTimeout(mainPressTimer);
+      mainPressTimer = setTimeout(async () => {
+        mainLongPress = true;
+        if (navigator.vibrate) navigator.vibrate(12);
+        await prime('auto');
+      }, LONG_PRESS_MS);
+    });
+    ['pointerup', 'pointerleave', 'pointercancel'].forEach(ev => {
+      $('btnMain').addEventListener(ev, () => clearTimeout(mainPressTimer));
+    });
+
     $('btnMain').addEventListener('click', async () => {
-      if (state.mode === 'idle') await prime();
-      else if (state.mode === 'primed' || state.mode === 'armed' || state.mode === 'cutout' || state.mode === 'seeking') await disarm(true);
+      if (mainLongPress) {
+        mainLongPress = false;
+        return;
+      }
+      if (state.mode === 'idle') await prime('manual');
+      else if (state.mode === 'primed' || state.mode === 'manual' || state.mode === 'armed' ||
+        state.mode === 'cutout' || state.mode === 'seeking') await disarm(true);
       else if (state.mode === 'backing') pauseBackupAndSeek();
     });
+
+    bindTrailHold($('btnTrailDown'), -TRAIL_STEP_MS, -TRAIL_HOLD_STEP_MS);
+    bindTrailHold($('btnTrailUp'), TRAIL_STEP_MS, TRAIL_HOLD_STEP_MS);
 
     $('btnTakeOver').addEventListener('click', takeOver);
     $('btnDismissCutout').addEventListener('click', dismissCutout);
@@ -3611,7 +3848,9 @@
 
     $('bufferDelay').addEventListener('input', e => {
       state.settings.bufferDelayMs = +e.target.value;
-      $('bufferDelayVal').textContent = fmtSettingMs(state.settings.bufferDelayMs);
+      if (trackingLocked) lockedBufferMs = state.settings.bufferDelayMs;
+      syncBufferDelayUi();
+      applyTrailToPlayback();
       scheduleSaveSettings();
     });
     $('silenceThreshold').addEventListener('input', e => {
@@ -3664,7 +3903,8 @@
     }
 
     document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'visible' && (state.mode === 'primed' || state.mode === 'armed' || state.mode === 'cutout' || state.mode === 'seeking')) {
+      if (document.visibilityState === 'visible' && (state.mode === 'primed' || state.mode === 'manual' ||
+        state.mode === 'armed' || state.mode === 'cutout' || state.mode === 'seeking')) {
         requestWakeLock();
         if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
       }
