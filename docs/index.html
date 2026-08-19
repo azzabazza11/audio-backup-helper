@@ -419,12 +419,55 @@
       min-width: 2.6em; text-align: right;
       font-size: 0.82rem; font-weight: 600; color: var(--ink);
     }
+    .trigger-log-wrap {
+      margin-top: 8px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: rgba(255,255,255,0.02);
+      overflow: hidden;
+    }
+    .trigger-log-toggle {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 10px 12px;
+      cursor: pointer;
+      list-style: none;
+      user-select: none;
+      font-size: 0.82rem;
+      color: var(--ink);
+    }
+    .trigger-log-toggle::-webkit-details-marker { display: none; }
+    .trigger-log-meta {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+      flex: 1;
+    }
+    .trigger-log-count {
+      flex-shrink: 0;
+      padding: 2px 8px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 0.72rem;
+    }
+    .trigger-log-preview {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      color: var(--muted);
+      font-size: 0.74rem;
+    }
     .trigger-log {
       margin: 0; padding: 8px 12px 8px 28px;
-      background: var(--bg); border: 1px solid var(--line);
-      border-radius: 8px; font-size: 0.72rem; color: var(--muted);
+      background: var(--bg); border-top: 1px solid var(--line);
+      font-size: 0.72rem; color: var(--muted);
       line-height: 1.45;
-      height: 220px; overflow-y: scroll;
+      max-height: 180px; overflow-y: auto;
       overscroll-behavior: contain;
       -webkit-overflow-scrolling: touch;
       touch-action: pan-y;
@@ -560,7 +603,16 @@
         <span class="mono conf-pct" id="clipConfPct">—</span>
       </div>
       <p class="fp-meta mono" id="triggerGates"></p>
-      <ol class="trigger-log" id="triggerLog"></ol>
+      <details class="trigger-log-wrap" id="triggerLogWrap">
+        <summary class="trigger-log-toggle">
+          <span class="trigger-log-meta">
+            <strong>Recent events</strong>
+            <span class="trigger-log-preview" id="triggerLogPreview">No events yet</span>
+          </span>
+          <span class="trigger-log-count mono" id="triggerLogCount">0</span>
+        </summary>
+        <ol class="trigger-log" id="triggerLog"></ol>
+      </details>
       <p class="fp-meta mono" id="triggerVerdict"></p>
       <div class="trigger-actions">
         <button type="button" class="btn" id="btnCopyLog">Copy log</button>
@@ -2407,7 +2459,13 @@
       }
       const actions = document.querySelector('.trigger-actions');
       if (actions) actions.hidden = !showDebug;
+      const logWrap = $('triggerLogWrap');
       const log = $('triggerLog');
+      if (logWrap) logWrap.hidden = !showDebug;
+      const logCount = $('triggerLogCount');
+      if (logCount) logCount.textContent = String(clipLog.length);
+      const logPreview = $('triggerLogPreview');
+      if (logPreview) logPreview.textContent = clipLog.length ? clipLog[clipLog.length - 1].line : 'No events yet';
       if (log) log.hidden = !showDebug;
       if (showDebug && log) {
         log.innerHTML = '';
@@ -2422,7 +2480,6 @@
             li.textContent = e.line;
             log.appendChild(li);
           });
-          log.lastElementChild?.scrollIntoView({ block: 'nearest' });
         }
       }
       const v = $('triggerVerdict');
@@ -3848,6 +3905,14 @@
 
       if (backupAudio) backupAudio.pause();
       inLogicalSync = false;
+      pushClipLog({
+        kind: 'miss',
+        at: Date.now(),
+        line: 'CUTOUT amp@' + fmtTime(roomPosition()) +
+          ' · silence ' + (unexpectedSilenceMs / 1000).toFixed(1) + 's' +
+          ' · trigger ' + (cutoutTriggerMs() / 1000).toFixed(1) + 's' +
+          ' · strong ' + (strongLockMs / 1000).toFixed(1) + 's'
+      });
       setMode('cutout');
     }
 
@@ -4043,8 +4108,16 @@
     async function takeOver() {
       if (!backupAudio) return;
       if (pendingPlayTimer) { clearTimeout(pendingPlayTimer); pendingPlayTimer = null; }
+      const seekSec = Math.max(0, roomPosition() - effectiveTrailMs() / 1000);
+      pushClipLog({
+        kind: 'lock',
+        at: Date.now(),
+        line: 'TAKE OVER amp@' + fmtTime(roomPosition()) +
+          ' · backup@' + fmtTime(seekSec) +
+          ' · trail ' + fmtTrailMs(effectiveTrailMs())
+      });
       backupAudio.volume = 1;
-      backupAudio.currentTime = Math.max(0, roomPosition() - effectiveTrailMs() / 1000);
+      backupAudio.currentTime = seekSec;
       await backupAudio.play();
       setMode('backing');
 
@@ -4062,6 +4135,11 @@
     }
 
     function dismissCutout() {
+      pushClipLog({
+        kind: 'spot',
+        at: Date.now(),
+        line: 'KEEP LISTENING amp@' + fmtTime(roomPosition()) + ' · tracking resumed'
+      });
       unexpectedSilenceMs = 0;
       micSpeechStartedAt = null;
       silenceSince = null;
