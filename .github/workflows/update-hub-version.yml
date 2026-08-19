@@ -1,0 +1,38 @@
+name: Update hub version
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/index.html'
+
+jobs:
+  update-hub:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Extract version from docs/index.html
+        id: ver
+        run: |
+          VERSION=$(curl -s "https://raw.githubusercontent.com/azzabazza11/audio-backup-helper/main/docs/index.html" \
+            | grep -oP '(?<=id="appVer">v)[0-9]+\.[0-9]+\.[0-9]+')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Checkout hub repo
+        uses: actions/checkout@v4
+        with:
+          repository: azzabazza11/azzabazza11.github.io
+          token: ${{ secrets.HUB_TOKEN }}
+          path: hub
+
+      - name: Update version string in apps/index.html
+        run: |
+          sed -i "s/version: '[0-9]*\.[0-9]*\.[0-9]*'/version: '${{ steps.ver.outputs.version }}'/" hub/apps/index.html
+
+      - name: Commit and push to hub
+        run: |
+          cd hub
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add apps/index.html
+          git diff --cached --quiet || git commit -m "chore: bump back-me-up to v${{ steps.ver.outputs.version }}"
+          git push
