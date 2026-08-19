@@ -701,7 +701,7 @@
   <div class="overlay" id="cutoutOverlay" role="dialog" aria-labelledby="cutoutTitle">
     <div class="overlay-card">
       <h2 id="cutoutTitle">Main audio stopped</h2>
-      <p>Mic went quiet where this file still has speech. Take over from the synced position?</p>
+      <p id="cutoutBody">Mic went quiet where this file still has speech. Listening for audio to return — or take over manually.</p>
       <button type="button" class="btn primary" id="btnTakeOver">Take Over</button>
       <button type="button" class="btn" id="btnDismissCutout" style="margin-top:10px">Keep listening</button>
     </div>
@@ -810,6 +810,7 @@
     let cutoutVerifyPending = false;
     let cutoutVerifyMode = false;
     let cutoutVerifyStartedAt = 0;
+    let cutoutRelockAttempts = 0;  // clips tried while overlay is showing
     let seekStopPos = 0;
     let seekStopAt = 0;
     let seekTemplate = null;
@@ -1551,7 +1552,11 @@
         }
         return line;
       }
-      if (state.mode === 'cutout') return 'Mic quiet where the file still has speech — Take over at the amp position';
+      if (state.mode === 'cutout') {
+        if (cutoutRelockAttempts > 0)
+          return 'Cutout · audio heard · re-locking… (attempt ' + cutoutRelockAttempts + ')';
+        return 'Cutout · listening — will auto-dismiss if audio returns';
+      }
       if (state.mode === 'manual') {
         if (!trackingLocked) {
           if (clipCollecting) return 'Tracking · recording clip near the expected file time…';
@@ -1699,7 +1704,13 @@
         btn.disabled = false;
       } else if (state.mode === 'cutout') {
         pill.classList.add('cutout');
-        $('statusText').textContent = 'Cutout detected';
+        $('statusText').textContent = cutoutRelockAttempts > 0
+          ? 'Cutout · re-locking… (' + cutoutRelockAttempts + ')'
+          : 'Cutout · listening';
+        const cb = $('cutoutBody');
+        if (cb) cb.textContent = cutoutRelockAttempts > 0
+          ? 'Audio detected — trying to re-lock position (attempt ' + cutoutRelockAttempts + '). Will auto-dismiss if successful.'
+          : 'Mic went quiet where this file still has speech. Listening for audio to return — or take over manually.';
         btn.textContent = 'Disarm';
         btn.className = 'btn';
         btn.disabled = false;
@@ -2847,6 +2858,7 @@
         try {
           if (wasCutoutVerify) applyCutoutVerifyMatch(samples, sr, spotStart, clipMs);
           else if (wasSpot) applySpotMatch(samples, sr, spotStart, clipMs);
+          else if (state.mode === 'cutout') applyCutoutRelock(samples, sr, clipMs);
           else if (state.mode === 'seeking') applySeekMatch(samples, sr, clipMs);
           else if (state.mode === 'manual') applyManualMatch(samples, sr, clipMs);
           else {
@@ -3012,6 +3024,72 @@
       const pattern = scoreSilencePattern(samples, sampleRate, result.offsetSec);
       Object.assign(result, pattern);
       applyClipMatch(result, clipMs);
+    }
+
+    // Called when a clip finishes while the cutout overlay is showing.
+    // Searches ±60 s forward (and a smaller window behind) from the current
+    // room clock.  A passing match auto-dismisses the overlay and re-locks.
+    function applyCutoutRelock(samples, sampleRate, clipMs) {
+      cutoutRelockAttempts++;
+      const room = roomPosition();
+      // Bias the window forward — the amp is more likely ahead than behind.
+      const fwdSec = SEEK_RADIUS_WIDE_SEC;
+      const bwdSec = 15;
+      const winStart = Math.max(0, room - bwdSec);
+      const winDur   = bwdSec + fwdSec;
+      const result = matchClipToWindow(samples, sampleRate, winStart, winDur, clipMs);
+      if (!result || result.score === 0) {
+        pushClipLog({ kind: 'miss', at: Date.now(),
+          line: 'CUTOUT RELOCK MISS attempt ' + cutoutRelockAttempts + ' · no match in ±' + fwdSec + 's window' });
+        updateUI();
+        return;
+      }
+      clipEnv = envelopeFromPcm(samples, sampleRate);
+      clipEnvFileAt = result.offsetSec;
+      const pattern = scoreSilencePattern(samples, sampleRate, result.offsetSec);
+      Object.assign(result, pattern);
+      const judged = judgeClip(result, clipMs);
+      const drift = Math.abs(result.offsetSec - room);
+      const base = formatClipLine(result, judged,
+        ' room@' + fmtTime(room) + ' new@' + fmtTime(result.offsetSec) + ' drift ' + drift.toFixed(1) + 's');
+      if (!judged.ok) {
+        pushClipLog({ kind: 'miss', at: Date.now(),
+          line: 'CUTOUT RELOCK WEAK attempt ' + cutoutRelockAttempts + ' · ' + base + ' · ' + judged.reasons.join(' · ') });
+        updateUI();
+        return;
+      }
+      // Good match — re-lock to the new position and auto-dismiss the overlay.
+      pushClipLog({ kind: 'lock', at: Date.now(),
+        line: 'CUTOUT RELOCK OK attempt ' + cutoutRelockAttempts + ' · ' + base });
+      // Recalculate trail relative to the new file position.
+      const backupNow = manualClockSec();
+      const newRoom = result.offsetSec;
+      manualMeasuredTrailMs = normalizeTrailMs((newRoom - backupNow) * 1000);
+      lockedBufferMs = normalizeTrailMs(manualMeasuredTrailMs + manualTrailAdjustMs);
+      state.settings.bufferDelayMs = lockedBufferMs;
+      syncBufferDelayUi();
+      lockPositionSec = newRoom;
+      lockClockAt = Date.now();
+      trackingLocked = true;
+      alignPerfAt = performance.now() / 1000;
+      alignFileAt = newRoom;
+      hasAlign = true;
+      inLogicalSync = true;
+      unexpectedSilenceMs = 0;
+      silenceSince = null;
+      micSpeechStartedAt = null;
+      lastSpeechAt = Date.now();
+      strongLockMs = 0;  // treat as fresh lock — earn trust again
+      lockReason = 'Re-locked after cutout · ' + base;
+      cutoutRelockAttempts = 0;
+      cutoutCooldownUntil = Date.now() + CUTOUT_COOLDOWN_MS;
+      cutoutVerifyPending = false;
+      cutoutVerifyMode = false;
+      spotChecksDone = 0;
+      nextSpotAt = Date.now() + SPOT_WAIT_MS;
+      lastSpotStatus = 're-locked after cutout';
+      setMode('manual');
+      updateUI();
     }
 
     function applySeekMatch(samples, sampleRate, clipMs) {
@@ -3776,6 +3854,10 @@
         if (trackingLocked) maybeSpotCheck(rms);
         checkCutout();
         tickPrimedViz();
+      } else if (state.mode === 'cutout') {
+        // Audio returned while overlay is showing — try to re-lock automatically.
+        beginClipIfNeeded(rms);
+        tickPrimedViz();
       } else if (state.mode === 'seeking') {
         beginClipIfNeeded(rms);
         tickPrimedViz();
@@ -3834,6 +3916,7 @@
       cutoutVerifyPending = false;
       cutoutVerifyMode = false;
       cutoutVerifyStartedAt = 0;
+      cutoutRelockAttempts = 0;
     }
 
     function noteUnexpectedSilence(fileExpects, heardSpeech) {
@@ -3905,6 +3988,9 @@
 
       if (backupAudio) backupAudio.pause();
       inLogicalSync = false;
+      // Halve strong-lock credit — position may be drifted; earn trust back after re-lock.
+      strongLockMs = Math.max(0, strongLockMs * 0.5);
+      cutoutRelockAttempts = 0;
       pushClipLog({
         kind: 'miss',
         at: Date.now(),
@@ -4147,6 +4233,7 @@
       inLogicalSync = true;
       cutoutVerifyPending = false;
       cutoutVerifyStartedAt = 0;
+      cutoutRelockAttempts = 0;
       cutoutCooldownUntil = Date.now() + CUTOUT_COOLDOWN_MS;
       lastSpotStatus = 'tracking resumed';
       setMode('manual');
