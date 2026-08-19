@@ -11,12 +11,15 @@ jobs:
   update-hub:
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout this repo
+        uses: actions/checkout@v4
+
       - name: Extract version from docs/index.html
         id: ver
         run: |
-          VERSION=$(curl -s "https://raw.githubusercontent.com/azzabazza11/audio-backup-helper/main/docs/index.html" \
-            | grep -oP '(?<=id="appVer">v)[0-9]+\.[0-9]+\.[0-9]+')
+          VERSION=$(grep -oP '(?<=id="appVer">v)[0-9]+\.[0-9]+\.[0-9]+' docs/index.html)
           echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Extracted version: $VERSION"
 
       - name: Checkout hub repo
         uses: actions/checkout@v4
@@ -25,9 +28,9 @@ jobs:
           token: ${{ secrets.HUB_TOKEN }}
           path: hub
 
-      - name: Update version string in apps/index.html
+      - name: Update Back Me Up version in apps/index.html
         run: |
-          sed -i "s/version: '[0-9]*\.[0-9]*\.[0-9]*'/version: '${{ steps.ver.outputs.version }}'/" hub/apps/index.html
+          sed -i "/id: 'audio-backup-helper'/,/^}/s/version: '[0-9]*\.[0-9]*\.[0-9]*'/version: '${{ steps.ver.outputs.version }}'/" hub/apps/index.html
 
       - name: Commit and push to hub
         run: |
