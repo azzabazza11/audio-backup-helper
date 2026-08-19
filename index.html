@@ -652,11 +652,6 @@
     </div>
     <p class="hint cal-hint" id="cutoutHint">Counts quiet time while the file still has speech. Brief mic blips under ~1.2 s do not reset the timer. After Keep listening, the app re-checks sync before cutout can fire again.</p>
     <div class="setting-row">
-      <label for="fingerprintSec">File fingerprint length</label>
-      <input type="range" id="fingerprintSec" min="15" max="30" step="1" value="30" />
-      <span class="val mono" id="fingerprintSecVal">30 s</span>
-    </div>
-    <div class="setting-row">
       <label for="matchThreshold">Clip match score</label>
       <input type="range" id="matchThreshold" min="0.25" max="0.85" step="0.05" value="0.5" />
       <span class="val mono" id="matchThresholdVal">0.50</span>
@@ -742,6 +737,7 @@
     const CLIP_PREROLL_SEC = 0.6;
     const BURST_TAIL_MS = 350;
     const TILE_SEC = 10;
+    const FP_INDEX_SEC = 30;  // seconds of file fingerprinted for viz / initial index
     const TILE_STEP_SEC = 5;
     const HOLD_CONTINUE_RATIO = 0.7;
     const ALIGN_MATCH_FLOOR = 0.28;
@@ -778,7 +774,6 @@
         bufferDelayMs: 2000,
         silenceThreshold: 0.02,
         silenceDurationMs: 800,
-        fingerprintSec: 30,
         matchThreshold: 0.5,
         confirmHoldMs: 5000,
         patternBlurMs: 150,
@@ -953,7 +948,7 @@
     }
 
     function fpStoreKey(file) {
-      return trackIdFor(file) + '|' + state.settings.fingerprintSec + '|' + FP_CACHE_VER;
+      return trackIdFor(file) + '|' + FP_INDEX_SEC + '|' + FP_CACHE_VER;
     }
 
     function idbOpen() {
@@ -1007,7 +1002,7 @@
           bufferDelayMs: state.settings.bufferDelayMs,
           silenceThreshold: state.settings.silenceThreshold,
           silenceDurationMs: state.settings.silenceDurationMs,
-          fingerprintSec: state.settings.fingerprintSec,
+          fingerprintSec: FP_INDEX_SEC,
           matchThreshold: state.settings.matchThreshold,
           confirmHoldMs: state.settings.confirmHoldMs,
           patternBlurMs: state.settings.patternBlurMs,
@@ -1030,8 +1025,6 @@
       $('silenceThresholdVal').textContent = s.silenceThreshold.toFixed(3);
       $('silenceDuration').value = String(s.silenceDurationMs);
       $('silenceDurationVal').textContent = fmtSettingMs(s.silenceDurationMs);
-      $('fingerprintSec').value = String(s.fingerprintSec);
-      $('fingerprintSecVal').textContent = s.fingerprintSec + ' s';
       $('matchThreshold').value = String(s.matchThreshold);
       $('matchThresholdVal').textContent = s.matchThreshold.toFixed(2);
       $('confirmHold').value = String(s.confirmHoldMs);
@@ -1053,7 +1046,6 @@
         if (saved.bufferDelayMs != null) s.bufferDelayMs = normalizeTrailMs(saved.bufferDelayMs);
         if (saved.silenceThreshold != null) s.silenceThreshold = clampSetting(saved.silenceThreshold, SILENCE_MIN, SILENCE_MAX);
         if (saved.silenceDurationMs != null) s.silenceDurationMs = clampSetting(saved.silenceDurationMs, 400, 30000);
-        if (saved.fingerprintSec != null) s.fingerprintSec = clampSetting(saved.fingerprintSec, 15, 30);
         if (saved.matchThreshold != null) s.matchThreshold = clampSetting(saved.matchThreshold, 0.25, 0.85);
         if (saved.confirmHoldMs != null) s.confirmHoldMs = clampSetting(saved.confirmHoldMs, 3000, 10000);
         if (saved.patternBlurMs != null) s.patternBlurMs = clampSetting(saved.patternBlurMs, 0, 400);
@@ -1080,7 +1072,7 @@
       });
       return {
         ver: FP_CACHE_VER,
-        fingerprintSec: state.settings.fingerprintSec,
+        fingerprintSec: FP_INDEX_SEC,
         hashCount: template.hashCount,
         peakCount: template.peakCount,
         duration: template.duration,
@@ -1128,7 +1120,7 @@
       templateIndex = unpackTemplate(row);
       const origin = templateOriginSec();
       const fpStart = Math.max(0, Math.floor(origin * ENVELOPE_RATE));
-      const fpEnd = Math.min(fileEnvelope.length, fpStart + Math.ceil(state.settings.fingerprintSec * ENVELOPE_RATE));
+      const fpEnd = Math.min(fileEnvelope.length, fpStart + Math.ceil(FP_INDEX_SEC * ENVELOPE_RATE));
       startBursts = extractBursts(fileEnvelope, fileSpeechThreshold, fpStart, fpEnd);
       updatePatternBlurHint();
     }
@@ -1137,7 +1129,7 @@
       try {
         const row = await fpGet(fpStoreKey(file));
         if (!row || row.ver !== FP_CACHE_VER) return null;
-        if (row.fingerprintSec !== state.settings.fingerprintSec) return null;
+        if (row.fingerprintSec !== FP_INDEX_SEC) return null;
         if (!row.envelope || !row.packed) return null;
         return row;
       } catch {
@@ -1334,7 +1326,7 @@
       const peak = peakOf(envelope) || 0.001;
       const thresh = Math.max(peak * 0.08, 0.008);
       const origin = firstBurstOriginSec(envelope, thresh);
-      const template = buildTemplateIndex(buffer, state.settings.fingerprintSec, origin);
+      const template = buildTemplateIndex(buffer, FP_INDEX_SEC, origin);
       return { buffer, envelope, thresh, template, duration: buffer.duration };
     }
 
@@ -1502,7 +1494,7 @@
     }
 
     function syncLineText() {
-      if (state.analysing) return 'Building a Shazam-style fingerprint of the first ' + state.settings.fingerprintSec + ' s…';
+      if (state.analysing) return 'Building a Shazam-style fingerprint of the first ' + FP_INDEX_SEC + ' s…';
       if (state.mode === 'primed') {
         if (clipCollecting) return 'Recording clip…';
         if (lastClipStatus === 'waiting') return 'Waiting for audio above the silence gate…';
@@ -2559,7 +2551,7 @@
           silenceThreshold: state.settings.silenceThreshold,
           silenceManual: !!silenceManual,
           silenceDurationMs: state.settings.silenceDurationMs,
-          fingerprintSec: state.settings.fingerprintSec,
+          fingerprintSec: FP_INDEX_SEC,
           matchThreshold: state.settings.matchThreshold,
           confirmHoldMs: state.settings.confirmHoldMs,
           patternBlurMs: state.settings.patternBlurMs,
@@ -3427,7 +3419,7 @@
     }
 
     function fpWindowSec() {
-      return Math.max(1, state.settings.fingerprintSec);
+      return FP_INDEX_SEC;
     }
 
     function fpScrollsWithTrack() {
@@ -4318,12 +4310,6 @@
       state.settings.silenceDurationMs = +e.target.value;
       $('silenceDurationVal').textContent = fmtSettingMs(state.settings.silenceDurationMs);
       scheduleSaveSettings();
-    });
-    $('fingerprintSec').addEventListener('input', e => {
-      state.settings.fingerprintSec = +e.target.value;
-      $('fingerprintSecVal').textContent = state.settings.fingerprintSec + ' s';
-      scheduleSaveSettings();
-      markCachedFlags().then(() => renderTrackList()).catch(() => {});
     });
     $('matchThreshold').addEventListener('input', e => {
       state.settings.matchThreshold = +e.target.value;
