@@ -689,6 +689,8 @@
     const CLIP_MAX_SEC = 30.0;
     const CLIP_PREROLL_SEC = 0.6;
     const BURST_TAIL_MS = 350;
+    const TILE_SEC = 10;
+    const TILE_STEP_SEC = 5;
     const HOLD_CONTINUE_RATIO = 0.7;
     const ALIGN_MATCH_FLOOR = 0.28;
     const SILENCE_MIN = 0.005;
@@ -1993,6 +1995,38 @@
       return { index, hashCount: hashes.length, peakCount: peaks.length, duration: n / sr, originSec: origin };
     }
 
+    // Match a clip against overlapping tiles across a search window.
+    // Returns the best-scoring result with absolute offsetSec already applied.
+    function matchClipToWindow(samples, sampleRate, winStart, winDur, clipMs) {
+      if (!fileBuffer) return null;
+      const clipSec = clipMs / 1000;
+      // Tile width: at least the clip length + 1s, capped at TILE_SEC (or wider for long clips).
+      const tileWidth = Math.max(clipSec + 1, TILE_SEC);
+      const step = Math.max(1, TILE_STEP_SEC);
+      let best = null;
+      let bestRank = -1;
+      let tileStart = winStart;
+      const winEnd = winStart + winDur;
+      while (tileStart < winEnd) {
+        const tileEnd = Math.min(winEnd, tileStart + tileWidth);
+        const tileDur = tileEnd - tileStart;
+        if (tileDur < clipSec * 0.8) break;
+        const tile = buildTemplateIndex(fileBuffer, tileDur, tileStart);
+        if (tile.hashCount < 8) { tileStart += step; continue; }
+        const res = matchClipToTemplate(samples, sampleRate, tile);
+        // Rank by score * coverage — both matter.
+        const rank = (res.score || 0) * (res.coverage || 0);
+        if (rank > bestRank) {
+          bestRank = rank;
+          best = res;
+          best.offsetSec = (tile.originSec || 0) + res.offsetSec;
+          best._tileOrigin = tile.originSec || 0;
+        }
+        tileStart += step;
+      }
+      return best;
+    }
+
     function scoreNeedHits(clipSec) {
       return Math.max(20, Math.round((clipSec || 4) * 10));
     }
@@ -2907,16 +2941,15 @@
     }
 
     function applyManualMatch(samples, sampleRate, clipMs) {
-      const local = refreshManualTemplate();
-      if (!local || !local.hashCount) {
+      const win = manualMatchWindow();
+      const result = matchClipToWindow(samples, sampleRate, win.start, win.dur, clipMs);
+      if (!result || result.score === 0) {
         lastClipStatus = 'miss';
-        lastClipFail = 'no local fingerprint window';
-        pushClipLog({ kind: 'miss', at: Date.now(), line: 'MAN MISS no local fingerprint' });
+        lastClipFail = 'no match in window';
+        pushClipLog({ kind: 'miss', at: Date.now(), line: 'MAN MISS no match in window' });
         updateUI();
         return;
       }
-      const result = matchClipToTemplate(samples, sampleRate, local);
-      result.offsetSec = (local.originSec || 0) + result.offsetSec;
       clipEnv = envelopeFromPcm(samples, sampleRate);
       clipEnvFileAt = result.offsetSec;
       const pattern = scoreSilencePattern(samples, sampleRate, result.offsetSec);
@@ -2925,16 +2958,15 @@
     }
 
     function applySeekMatch(samples, sampleRate, clipMs) {
-      const local = refreshSeekTemplate();
-      if (!local || !local.hashCount) {
+      const win = seekWindow();
+      const result = matchClipToWindow(samples, sampleRate, win.start, win.dur, clipMs);
+      if (!result || result.score === 0) {
         lastClipStatus = 'miss';
-        lastClipFail = 'no file window to search';
-        pushClipLog({ kind: 'miss', at: Date.now(), line: 'SEEK MISS no local fingerprint' });
+        lastClipFail = 'no match in seek window';
+        pushClipLog({ kind: 'miss', at: Date.now(), line: 'SEEK MISS no match in window' });
         updateUI();
         return;
       }
-      const result = matchClipToTemplate(samples, sampleRate, local);
-      result.offsetSec = (local.originSec || 0) + result.offsetSec;
       clipEnv = envelopeFromPcm(samples, sampleRate);
       clipEnvFileAt = result.offsetSec;
       const pattern = scoreSilencePattern(samples, sampleRate, result.offsetSec);
