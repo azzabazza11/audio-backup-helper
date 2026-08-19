@@ -669,9 +669,9 @@
     const STRONG_LOCK_SCORE = 0.98;
     const STRONG_LOCK_COVERAGE = 0.55;
     const STRONG_LOCK_MIN_MS = 6000;
-    const STRONG_LOCK_MAX_MS = 20000;
-    const STRONG_LOCK_DECAY_MS = 2500;
-    const STRONG_LOCK_SILENCE_MULT = 2.5;
+    const STRONG_LOCK_MAX_MS = 30000;
+    const STRONG_LOCK_DECAY_MS = 1000;
+    const STRONG_LOCK_SILENCE_MULT = 3.0;
     const HOLD_CONTINUE_RATIO = 0.7;
     const ALIGN_MATCH_FLOOR = 0.28;
     const SILENCE_MIN = 0.005;
@@ -794,6 +794,7 @@
     let lastHitPerf = 0;
     let hitStreak = 0;
     let clipLog = [];
+    let logCounter = 0;
     let lockReason = '';
     let lastClipPerfStart = 0;
     let alignPerfAt = 0;
@@ -2459,7 +2460,8 @@
     }
 
     async function copyDiagnostics() {
-      const text = diagnosticText();
+      const title = logTitle();
+      const text = title + '\n\n' + diagnosticText();
       try {
         if (navigator.clipboard && navigator.clipboard.writeText) {
           await navigator.clipboard.writeText(text);
@@ -2485,11 +2487,21 @@
       }
     }
 
+    function logTitle() {
+      logCounter += 1;
+      const d = new Date();
+      const pad = n => String(n).padStart(2, '0');
+      const stamp = pad(d.getDate()) + '/' + pad(d.getMonth() + 1) + '/' + d.getFullYear() +
+        ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+      return 'Back Me Up log #' + logCounter + ' — ' + stamp;
+    }
+
     async function shareDiagnostics() {
-      const text = diagnosticText();
+      const title = logTitle();
+      const text = title + '\n\n' + diagnosticText();
       if (navigator.share) {
         try {
-          await navigator.share({ title: 'Back Me Up log', text });
+          await navigator.share({ title, text });
           return;
         } catch (err) {
           if (err && err.name === 'AbortError') return;
