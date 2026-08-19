@@ -134,6 +134,9 @@
     .track-list {
       list-style: none; margin: 12px 0 0; padding: 0;
       max-height: 240px; overflow-y: auto;
+      overscroll-behavior: contain;
+      -webkit-overflow-scrolling: touch;
+      touch-action: pan-y;
       border: 1px solid var(--line); border-radius: 14px;
     }
     .track-list li {
@@ -410,6 +413,9 @@
       background: var(--bg); border: 1px solid var(--line);
       border-radius: 8px; font-size: 0.72rem; color: var(--muted);
       line-height: 1.45; max-height: 220px; overflow-y: auto;
+      overscroll-behavior: contain;
+      -webkit-overflow-scrolling: touch;
+      touch-action: pan-y;
     }
     .trigger-log li { margin: 0 0 6px; }
     .trigger-log li.hit { color: var(--ok); }
