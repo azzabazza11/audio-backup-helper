@@ -605,11 +605,6 @@
       <span class="val mono" id="fingerprintSecVal">30 s</span>
     </div>
     <div class="setting-row">
-      <label for="clipSec">Mic clip to match</label>
-      <input type="range" id="clipSec" min="2" max="8" step="1" value="4" />
-      <span class="val mono" id="clipSecVal">4 s</span>
-    </div>
-    <div class="setting-row">
       <label for="matchThreshold">Clip match score</label>
       <input type="range" id="matchThreshold" min="0.25" max="0.85" step="0.05" value="0.5" />
       <span class="val mono" id="matchThresholdVal">0.50</span>
@@ -644,7 +639,7 @@
   </details>
 
   <p class="ver mono" id="appVer">v1.6.0</p>
-  <p class="ver-note" id="appVerNote" hidden>No clip matching after lock · coverage gate relaxed for high-score clips · stronger sticky lock · numbered log timestamps</p>
+  <p class="ver-note" id="appVerNote" hidden>Burst-bounded clips (1–30 s, natural word boundaries, 0.6 s pre-roll) · no fixed-length recording · clip length scales thresholds</p>
 
   <div class="bottom-bar">
     <p class="bottom-hint" id="mainBtnHint">Press to start tracking · Take Over when ready</p>
@@ -690,6 +685,10 @@
     const STRONG_LOCK_MAX_MS = 30000;
     const STRONG_LOCK_DECAY_MS = 1000;
     const STRONG_LOCK_SILENCE_MULT = 3.0;
+    const CLIP_MIN_SEC = 1.0;
+    const CLIP_MAX_SEC = 30.0;
+    const CLIP_PREROLL_SEC = 0.6;
+    const BURST_TAIL_MS = 350;
     const HOLD_CONTINUE_RATIO = 0.7;
     const ALIGN_MATCH_FLOOR = 0.28;
     const SILENCE_MIN = 0.005;
@@ -726,7 +725,6 @@
         silenceThreshold: 0.02,
         silenceDurationMs: 800,
         fingerprintSec: 30,
-        clipSec: 4,
         matchThreshold: 0.5,
         confirmHoldMs: 5000,
         patternBlurMs: 150,
@@ -797,6 +795,9 @@
     let clipCollecting = false;
     let clipParts = [];
     let clipLength = 0;
+    let prerollBuf = null;
+    let prerollHead = 0;
+    let burstSilenceSince = 0;
     let clipBusy = false;
     let lastClipHits = 0;
     let lastClipOffset = 0;
@@ -952,7 +953,6 @@
           silenceThreshold: state.settings.silenceThreshold,
           silenceDurationMs: state.settings.silenceDurationMs,
           fingerprintSec: state.settings.fingerprintSec,
-          clipSec: state.settings.clipSec,
           matchThreshold: state.settings.matchThreshold,
           confirmHoldMs: state.settings.confirmHoldMs,
           patternBlurMs: state.settings.patternBlurMs,
@@ -977,8 +977,6 @@
       $('silenceDurationVal').textContent = fmtSettingMs(s.silenceDurationMs);
       $('fingerprintSec').value = String(s.fingerprintSec);
       $('fingerprintSecVal').textContent = s.fingerprintSec + ' s';
-      $('clipSec').value = String(s.clipSec);
-      $('clipSecVal').textContent = s.clipSec + ' s';
       $('matchThreshold').value = String(s.matchThreshold);
       $('matchThresholdVal').textContent = s.matchThreshold.toFixed(2);
       $('confirmHold').value = String(s.confirmHoldMs);
@@ -1001,7 +999,6 @@
         if (saved.silenceThreshold != null) s.silenceThreshold = clampSetting(saved.silenceThreshold, SILENCE_MIN, SILENCE_MAX);
         if (saved.silenceDurationMs != null) s.silenceDurationMs = clampSetting(saved.silenceDurationMs, 400, 30000);
         if (saved.fingerprintSec != null) s.fingerprintSec = clampSetting(saved.fingerprintSec, 15, 30);
-        if (saved.clipSec != null) s.clipSec = clampSetting(saved.clipSec, 2, 8);
         if (saved.matchThreshold != null) s.matchThreshold = clampSetting(saved.matchThreshold, 0.25, 0.85);
         if (saved.confirmHoldMs != null) s.confirmHoldMs = clampSetting(saved.confirmHoldMs, 3000, 10000);
         if (saved.patternBlurMs != null) s.patternBlurMs = clampSetting(saved.patternBlurMs, 0, 400);
@@ -1452,8 +1449,8 @@
     function syncLineText() {
       if (state.analysing) return 'Building a Shazam-style fingerprint of the first ' + state.settings.fingerprintSec + ' s…';
       if (state.mode === 'primed') {
-        if (clipCollecting) return 'Recording ' + state.settings.clipSec + ' s clip to match the file…';
-        if (lastClipStatus === 'waiting') return 'Waiting for audio above the silence gate, then a ' + state.settings.clipSec + ' s clip';
+        if (clipCollecting) return 'Recording clip…';
+        if (lastClipStatus === 'waiting') return 'Waiting for audio above the silence gate…';
         const matchPct = Math.round(lastMatchScore * 100);
         const clipBit = 'clip ' + matchPct + '% · ' + lastClipHits + ' hits · ×' +
           lastClipContrast.toFixed(1) + ' · ' + Math.round(lastClipCoverage * 100) + '% cover' +
@@ -1621,7 +1618,7 @@
         if (state.analysing) {
           $('statusText').textContent = 'Analysing track';
         } else if (clipCollecting) {
-          $('statusText').textContent = 'Recording ' + state.settings.clipSec + ' s clip';
+          $('statusText').textContent = 'Recording clip…';
         } else if (confirmStartedAt) {
           const held = (confirmHeldMs / 1000).toFixed(1);
           const need = (state.settings.confirmHoldMs / 1000).toFixed(1);
@@ -1996,16 +1993,16 @@
       return { index, hashCount: hashes.length, peakCount: peaks.length, duration: n / sr, originSec: origin };
     }
 
-    function scoreNeedHits() {
-      return Math.max(20, Math.round(state.settings.clipSec * 10));
+    function scoreNeedHits(clipSec) {
+      return Math.max(20, Math.round((clipSec || 4) * 10));
     }
 
-    function minPeakHits() {
-      return Math.max(15, Math.round(state.settings.clipSec * 8));
+    function minPeakHits(clipSec) {
+      return Math.max(15, Math.round((clipSec || 4) * 8));
     }
 
-    function minFoundHashes() {
-      return Math.max(30, Math.round(state.settings.clipSec * 15));
+    function minFoundHashes(clipSec) {
+      return Math.max(30, Math.round((clipSec || 4) * 15));
     }
 
     function envelopeFromPcm(samples, sampleRate) {
@@ -2116,10 +2113,11 @@
       };
     }
 
-    function judgeClip(result) {
-      const needHits = minPeakHits();
-      const needScore = scoreNeedHits();
-      const needFound = minFoundHashes();
+    function judgeClip(result, clipMs) {
+      const clipSec = clipMs ? clipMs / 1000 : 4;
+      const needHits = minPeakHits(clipSec);
+      const needScore = scoreNeedHits(clipSec);
+      const needFound = minFoundHashes(clipSec);
       const score = result.score;
       const coverage = result.coverage || 0;
       const found = result.found || 0;
@@ -2460,7 +2458,6 @@
           silenceManual: !!silenceManual,
           silenceDurationMs: state.settings.silenceDurationMs,
           fingerprintSec: state.settings.fingerprintSec,
-          clipSec: state.settings.clipSec,
           matchThreshold: state.settings.matchThreshold,
           confirmHoldMs: state.settings.confirmHoldMs,
           patternBlurMs: state.settings.patternBlurMs,
@@ -2622,13 +2619,51 @@
       micSource.connect(captureNode);
       captureNode.connect(captureGain);
       captureGain.connect(Ctx.destination);
+
+      const sr = Ctx.sampleRate;
+      const prerollSamples = Math.ceil(CLIP_PREROLL_SEC * sr);
+      prerollBuf = new Float32Array(prerollSamples);
+      prerollHead = 0;
+
       captureNode.onaudioprocess = ev => {
-        if (!clipCollecting || (state.mode !== 'primed' && state.mode !== 'manual' && state.mode !== 'armed' && state.mode !== 'seeking')) return;
+        const activeMode = state.mode === 'primed' || state.mode === 'manual' ||
+          state.mode === 'armed' || state.mode === 'seeking';
+        if (!activeMode) return;
+
         const data = ev.inputBuffer.getChannelData(0);
+
+        // Always keep pre-roll ring topped up.
+        for (let i = 0; i < data.length; i++) {
+          prerollBuf[prerollHead % prerollSamples] = data[i];
+          prerollHead++;
+        }
+
+        if (!clipCollecting) return;
+
         clipParts.push(new Float32Array(data));
         clipLength += data.length;
-        const need = Math.floor(state.settings.clipSec * Ctx.sampleRate);
-        if (clipLength >= need) finishClip();
+
+        // Check for burst end: RMS of this chunk below gate.
+        let chunkRms = 0;
+        for (let i = 0; i < data.length; i++) chunkRms += data[i] * data[i];
+        chunkRms = Math.sqrt(chunkRms / data.length);
+        const gate = state.settings.silenceThreshold;
+        const nowMs = Date.now();
+
+        if (chunkRms <= gate) {
+          if (!burstSilenceSince) burstSilenceSince = nowMs;
+          const silentMs = nowMs - burstSilenceSince;
+          const clipSec = clipLength / sr;
+          if (clipSec >= CLIP_MIN_SEC && silentMs >= BURST_TAIL_MS) {
+            finishClip();
+            return;
+          }
+        } else {
+          burstSilenceSince = 0;
+        }
+
+        // Hard max.
+        if (clipLength / sr >= CLIP_MAX_SEC) finishClip();
       };
     }
 
@@ -2644,13 +2679,29 @@
       clipParts = [];
       clipLength = 0;
       clipBusy = false;
+      prerollBuf = null;
+      prerollHead = 0;
+      burstSilenceSince = 0;
     }
 
     function beginClipCollect() {
       clipCollecting = true;
-      clipParts = [];
-      clipLength = 0;
+      burstSilenceSince = 0;
       lastClipPerfStart = performance.now() / 1000;
+      // Prepend pre-roll so we capture from burst start, not mid-word.
+      if (prerollBuf && prerollHead > 0) {
+        const len = prerollBuf.length;
+        const filled = Math.min(prerollHead, len);
+        const pre = new Float32Array(filled);
+        for (let i = 0; i < filled; i++) {
+          pre[i] = prerollBuf[(prerollHead - filled + i + len * 2) % len];
+        }
+        clipParts = [pre];
+        clipLength = filled;
+      } else {
+        clipParts = [];
+        clipLength = 0;
+      }
     }
 
     function beginClipIfNeeded(rms) {
@@ -2680,19 +2731,22 @@
     function finishClip() {
       if (clipBusy) return;
       clipCollecting = false;
+      burstSilenceSince = 0;
       clipBusy = true;
       const sr = audioCtx.sampleRate;
-      const need = Math.floor(state.settings.clipSec * sr);
-      const samples = new Float32Array(need);
+      // Use actual collected length — burst-bounded, not fixed.
+      const collected = clipLength;
+      const samples = new Float32Array(collected);
       let w = 0;
-      for (let i = 0; i < clipParts.length && w < need; i++) {
+      for (let i = 0; i < clipParts.length && w < collected; i++) {
         const part = clipParts[i];
-        const n = Math.min(part.length, need - w);
+        const n = Math.min(part.length, collected - w);
         samples.set(part.subarray(0, n), w);
         w += n;
       }
       clipParts = [];
       clipLength = 0;
+      const clipMs = collected / sr * 1000;
       const wasSpot = spotMode;
       const wasCutoutVerify = cutoutVerifyMode;
       const spotStart = spotFileStart;
@@ -2700,17 +2754,17 @@
       cutoutVerifyMode = false;
       setTimeout(() => {
         try {
-          if (wasCutoutVerify) applyCutoutVerifyMatch(samples, sr, spotStart, need / sr * 1000);
-          else if (wasSpot) applySpotMatch(samples, sr, spotStart, need / sr * 1000);
-          else if (state.mode === 'seeking') applySeekMatch(samples, sr, need / sr * 1000);
-          else if (state.mode === 'manual') applyManualMatch(samples, sr, need / sr * 1000);
+          if (wasCutoutVerify) applyCutoutVerifyMatch(samples, sr, spotStart, clipMs);
+          else if (wasSpot) applySpotMatch(samples, sr, spotStart, clipMs);
+          else if (state.mode === 'seeking') applySeekMatch(samples, sr, clipMs);
+          else if (state.mode === 'manual') applyManualMatch(samples, sr, clipMs);
           else {
             const result = matchClipToTemplate(samples, sr, templateIndex);
             result.offsetSec = templateOriginSec() + result.offsetSec;
             clipEnv = envelopeFromPcm(samples, sr);
             clipEnvFileAt = result.offsetSec;
             const pattern = scoreSilencePattern(samples, sr, result.offsetSec);
-            applyClipMatch(Object.assign(result, pattern), need / sr * 1000);
+            applyClipMatch(Object.assign(result, pattern), clipMs);
           }
         } finally {
           clipBusy = false;
@@ -2719,7 +2773,7 @@
     }
 
     function applyClipMatch(result, clipMs) {
-      const judged = judgeClip(result);
+      const judged = judgeClip(result, clipMs);
       const now = Date.now();
       let clockNote = '';
       if (judged.ok && hitStreak >= 1 && lastHitPerf) {
@@ -2905,7 +2959,7 @@
       clipEnvFileAt = absOffset;
       const pattern = scoreSilencePattern(samples, sampleRate, absOffset);
       Object.assign(result, pattern);
-      const judged = judgeClip(result);
+      const judged = judgeClip(result, clipMs);
       const drift = Math.abs(absOffset - fileStart);
       const close = drift < 1.5;
       const good = judged.ok && close;
@@ -2996,7 +3050,7 @@
       clipEnvFileAt = absOffset;
       const pattern = scoreSilencePattern(samples, sampleRate, absOffset);
       Object.assign(result, pattern);
-      const judged = judgeClip(result);
+      const judged = judgeClip(result, clipMs);
       const drift = Math.abs(absOffset - fileStart);
       const close = drift < 1.5;
       const good = judged.ok && close;
@@ -4071,11 +4125,6 @@
       $('fingerprintSecVal').textContent = state.settings.fingerprintSec + ' s';
       scheduleSaveSettings();
       markCachedFlags().then(() => renderTrackList()).catch(() => {});
-    });
-    $('clipSec').addEventListener('input', e => {
-      state.settings.clipSec = +e.target.value;
-      $('clipSecVal').textContent = state.settings.clipSec + ' s';
-      scheduleSaveSettings();
     });
     $('matchThreshold').addEventListener('input', e => {
       state.settings.matchThreshold = +e.target.value;
