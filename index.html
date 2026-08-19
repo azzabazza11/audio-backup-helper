@@ -629,7 +629,7 @@
   <p class="ver mono" id="appVer">v1.5.6</p>
 
   <div class="bottom-bar">
-    <p class="bottom-hint" id="mainBtnHint">Tap — manual tracking · Hold — auto lock-on</p>
+    <p class="bottom-hint" id="mainBtnHint">Press to start tracking · Take Over when ready</p>
     <button type="button" class="btn primary" id="btnMain" disabled>Back me up</button>
   </div>
 
@@ -649,7 +649,6 @@
     const ENVELOPE_RATE = 20;
     const TRAIL_STEP_MS = 1000;
     const TRAIL_HOLD_STEP_MS = 1000;
-    const LONG_PRESS_MS = 550;
     const LISTEN_MS = 50;
     const MIN_BURST_SEC = 0.18;
     const MIN_LOCK_SPEECH_SEC = 0.4;
@@ -691,6 +690,8 @@
     const SPOT_WAIT_MS = 60000;
     const SEEK_RADIUS_SEC = 30;
     const SEEK_WINDOW_MAX = 90;
+    const SEEK_RADIUS_WIDE_SEC = 60;
+    const MANUAL_WIDE_MISS_THRESH = 3;
     const FP_SCROLL_LEAD = 0.32;
     const SPOT_PREROLL = 0.35;
     const FP_CACHE_VER = 2;
@@ -815,14 +816,13 @@
     let showDebug = false;
     let showViz = false;
     let settingsLocked = false;
-    let armKind = null;
     let manualStartedAt = 0;
     let manualBaseSec = 0;
     let manualTemplate = null;
     let manualWinStart = -1;
     let manualWinDur = 0;
-    let mainLongPress = false;
-    let mainPressTimer = null;
+    let manualWinWide = false;
+    let manualMissStreak = 0;
     const fpInflight = new Map();
 
     function fmtTime(sec) {
@@ -1348,7 +1348,7 @@
     }
 
     function effectiveTrailMs() {
-      if (armKind === 'manual' && trackingLocked && manualMeasuredTrailMs) {
+      if (trackingLocked && manualMeasuredTrailMs) {
         return normalizeTrailMs(manualMeasuredTrailMs + manualTrailAdjustMs);
       }
       if (trackingLocked && lockedBufferMs) return lockedBufferMs;
@@ -1393,7 +1393,7 @@
       const next = normalizeTrailMs(current + deltaMs);
       if (next === current) return;
       state.settings.bufferDelayMs = next;
-      if (armKind === 'manual' && trackingLocked && manualMeasuredTrailMs) {
+      if (trackingLocked && manualMeasuredTrailMs) {
         manualTrailAdjustMs = next - manualMeasuredTrailMs;
         lockedBufferMs = next;
         manualTemplate = null;
@@ -2713,6 +2713,7 @@
         lastClipFail = '';
         confirmBadSince = null;
         hitStreak += 1;
+        manualMissStreak = 0;
         lastHitOffset = result.offsetSec;
         lastHitPerf = lastClipPerfStart;
         hasAlign = true;
@@ -2749,6 +2750,7 @@
         hitStreak = 0;
         lastHitOffset = 0;
         lastHitPerf = 0;
+        if (state.mode === 'manual' && !trackingLocked) manualMissStreak += 1;
         pushClipLog({
           kind: 'miss',
           at: Date.now(),
@@ -2787,22 +2789,27 @@
 
     function manualMatchWindow() {
       const center = roomPosition();
-      const lo = Math.max(0, center - SEEK_RADIUS_SEC);
-      const hiRaw = center + SEEK_RADIUS_SEC;
+      // Widen the search after repeated misses while the mic is clearly hearing something.
+      const widen = manualMissStreak >= MANUAL_WIDE_MISS_THRESH && ambientRms > 0;
+      const radius = widen ? SEEK_RADIUS_WIDE_SEC : SEEK_RADIUS_SEC;
+      const lo = Math.max(0, center - radius);
+      const hiRaw = center + radius;
       const cap = fileDuration || hiRaw;
-      const hi = Math.min(cap, lo + SEEK_WINDOW_MAX, hiRaw);
-      return { start: lo, dur: Math.max(8, hi - lo), center };
+      const hi = Math.min(cap, lo + SEEK_WINDOW_MAX * 2, hiRaw);
+      return { start: lo, dur: Math.max(8, hi - lo), center, wide: widen };
     }
 
     function refreshManualTemplate() {
       if (!fileBuffer) return null;
       const win = manualMatchWindow();
-      if (manualTemplate && Math.abs(win.start - manualWinStart) < 2 && Math.abs(win.dur - manualWinDur) < 4) {
+      if (manualTemplate && Math.abs(win.start - manualWinStart) < 2 &&
+          Math.abs(win.dur - manualWinDur) < 4 && !!win.wide === !!manualWinWide) {
         return manualTemplate;
       }
       manualTemplate = buildTemplateIndex(fileBuffer, win.dur, win.start);
       manualWinStart = win.start;
       manualWinDur = win.dur;
+      manualWinWide = win.wide;
       return manualTemplate;
     }
 
@@ -3476,20 +3483,12 @@
     }
 
     function roomPosition() {
-      if (state.mode === 'backing' && backupAudio) {
-        // Manual-origin: amp clock is manualClockSec, independent of trail.
-        if (armKind === 'manual' && manualStartedAt) {
-          return manualClockSec();
-        }
-        return backupAudio.currentTime + lockedBufferMs / 1000;
-      }
-      if (state.mode === 'manual') {
-        // Amp time is the user-started clock; trail only offsets the backup display.
+      // Amp clock is always the user-started manual clock; trail only shifts the backup.
+      if (state.mode === 'backing' && backupAudio && manualStartedAt) {
         return manualClockSec();
       }
-      if (backupAudio && trackingLocked && !backupAudio.ended && !backupAudio.paused &&
-          armKind !== 'manual' && state.mode !== 'manual') {
-        return backupAudio.currentTime + lockedBufferMs / 1000;
+      if (state.mode === 'manual' || state.mode === 'backing') {
+        return manualClockSec();
       }
       if (trackingLocked && lockClockAt) {
         return lockPositionSec + (Date.now() - lockClockAt) / 1000;
@@ -3498,13 +3497,9 @@
     }
 
     function backupPosition() {
-      // Manual modes: backup lags amp by the trail amount.
-      if (armKind === 'manual' && manualStartedAt) {
-        if (state.mode === 'backing' && backupAudio) return backupAudio.currentTime;
-        return Math.max(0, manualClockSec() - effectiveTrailMs() / 1000);
-      }
-      if (backupAudio && trackingLocked) return backupAudio.currentTime;
-      return Math.max(0, roomPosition() - lockedBufferMs / 1000);
+      // Backup lags amp by the trail amount; during active playback, use the audio clock.
+      if (state.mode === 'backing' && backupAudio) return backupAudio.currentTime;
+      return Math.max(0, manualClockSec() - effectiveTrailMs() / 1000);
     }
 
     function noteMicEnergy(rms) {
@@ -3587,43 +3582,16 @@
     async function activateSync(fingerprintSec, confirmMs) {
       const roomNow = fingerprintSec + confirmMs / 1000;
 
-      if (armKind === 'manual') {
-        const backupNow = manualClockSec();
-        const computedTrail = normalizeTrailMs((roomNow - backupNow) * 1000);
-        manualMeasuredTrailMs = computedTrail;
-        lockedBufferMs = normalizeTrailMs(manualMeasuredTrailMs + manualTrailAdjustMs);
-        state.settings.bufferDelayMs = lockedBufferMs;
-        syncBufferDelayUi();
-        lockPositionSec = roomNow;
-        lockClockAt = Date.now();
-        trackingLocked = true;
-        trackedPosition = Math.max(0, roomNow - lockedBufferMs / 1000);
-        lastSpeechAt = Date.now();
-        silenceSince = null;
-        resetCutoutState();
-        resetConfirmHold();
-        inLogicalSync = true;
-        hasAlign = true;
-        alignPerfAt = performance.now() / 1000;
-        alignFileAt = roomNow;
-        spotChecksDone = 0;
-        nextSpotAt = Date.now() + SPOT_WAIT_MS;
-        lastSpotStatus = 'trail measured · spot check in ~1 min';
-        if (pendingPlayTimer) {
-          clearTimeout(pendingPlayTimer);
-          pendingPlayTimer = null;
-        }
-        setMode('manual');
-        updateUI();
-        return;
-      }
-
-      const trailMs = state.settings.bufferDelayMs;
+      const backupNow = manualClockSec();
+      const computedTrail = normalizeTrailMs((roomNow - backupNow) * 1000);
+      manualMeasuredTrailMs = computedTrail;
+      lockedBufferMs = normalizeTrailMs(manualMeasuredTrailMs + manualTrailAdjustMs);
+      state.settings.bufferDelayMs = lockedBufferMs;
+      syncBufferDelayUi();
       lockPositionSec = roomNow;
       lockClockAt = Date.now();
-      lockedBufferMs = trailMs;
       trackingLocked = true;
-      trackedPosition = Math.max(0, roomNow - trailMs / 1000);
+      trackedPosition = Math.max(0, roomNow - lockedBufferMs / 1000);
       lastSpeechAt = Date.now();
       silenceSince = null;
       resetCutoutState();
@@ -3634,31 +3602,14 @@
       alignFileAt = roomNow;
       spotChecksDone = 0;
       nextSpotAt = Date.now() + SPOT_WAIT_MS;
-      lastSpotStatus = 'spot check in ~1 min';
-
+      lastSpotStatus = 'trail measured · spot check in ~1 min';
+      manualMissStreak = 0;
       if (pendingPlayTimer) {
         clearTimeout(pendingPlayTimer);
         pendingPlayTimer = null;
       }
-
-      if (backupAudio) {
-        backupAudio.volume = 0;
-        const backupStart = roomNow - trailMs / 1000;
-        if (backupStart < 0) {
-          backupAudio.currentTime = 0;
-          backupAudio.pause();
-          pendingPlayTimer = setTimeout(() => {
-            pendingPlayTimer = null;
-            if (state.mode !== 'armed' || !backupAudio) return;
-            backupAudio.play().catch(() => {});
-          }, Math.round(-backupStart * 1000));
-        } else {
-          backupAudio.currentTime = backupStart;
-          await backupAudio.play().catch(() => {});
-        }
-      }
-
-      setMode('armed');
+      setMode('manual');
+      updateUI();
     }
 
     function resetCutoutState() {
@@ -3758,11 +3709,9 @@
       }
     }
 
-    async function prime(kind) {
+    async function prime() {
       const track = selectedTrack();
       if (!track) return;
-      armKind = kind || 'auto';
-
       try {
         ensureAudioCtx();
         lastMatchGated = true;
@@ -3773,7 +3722,7 @@
         fileBursts = [];
         startBursts = [];
         state.analysing = true;
-        setMode(armKind === 'manual' ? 'manual' : 'primed');
+        setMode('manual');
 
         micStream = await navigator.mediaDevices.getUserMedia({
           audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
@@ -3847,13 +3796,13 @@
         manualTemplate = null;
         manualWinStart = -1;
         manualWinDur = 0;
+        manualWinWide = false;
+        manualMissStreak = 0;
         if (pendingPlayTimer) { clearTimeout(pendingPlayTimer); pendingPlayTimer = null; }
 
         state.analysing = false;
-        if (armKind === 'manual') {
-          manualBaseSec = 0;
-          manualStartedAt = Date.now();
-        }
+        manualBaseSec = 0;
+        manualStartedAt = Date.now();
         renderTrackList();
         updateUI();
         if (!fileBuffer && track.file) {
@@ -3929,7 +3878,7 @@
       trackingLocked = false;
       manualStartedAt = 0;
       manualBaseSec = 0;
-      armKind = null;
+
       setMode('idle');
       updateProgressDisplay();
     }
@@ -3938,10 +3887,7 @@
       if (!backupAudio) return;
       if (pendingPlayTimer) { clearTimeout(pendingPlayTimer); pendingPlayTimer = null; }
       backupAudio.volume = 1;
-      const seekSec = armKind === 'manual'
-        ? Math.max(0, roomPosition() - effectiveTrailMs() / 1000)
-        : Math.max(0, backupPosition());
-      backupAudio.currentTime = seekSec;
+      backupAudio.currentTime = Math.max(0, roomPosition() - effectiveTrailMs() / 1000);
       await backupAudio.play();
       setMode('backing');
 
@@ -3959,35 +3905,16 @@
     }
 
     function dismissCutout() {
-      if (armKind === 'manual') {
-        unexpectedSilenceMs = 0;
-        micSpeechStartedAt = null;
-        silenceSince = null;
-        lastSpeechAt = Date.now();
-        inLogicalSync = true;
-        cutoutVerifyPending = false;
-        cutoutVerifyStartedAt = 0;
-        cutoutCooldownUntil = Date.now() + CUTOUT_COOLDOWN_MS;
-        lastSpotStatus = 'manual tracking resumed';
-        setMode('manual');
-        if (!listenTimer) listenTimer = setInterval(tickListen, LISTEN_MS);
-        updateUI();
-        return;
-      }
       unexpectedSilenceMs = 0;
       micSpeechStartedAt = null;
       silenceSince = null;
       lastSpeechAt = Date.now();
       inLogicalSync = true;
-      cutoutVerifyPending = true;
-      cutoutVerifyStartedAt = Date.now();
+      cutoutVerifyPending = false;
+      cutoutVerifyStartedAt = 0;
       cutoutCooldownUntil = Date.now() + CUTOUT_COOLDOWN_MS;
-      lastSpotStatus = 're-checking sync…';
-      if (backupAudio) {
-        backupAudio.volume = 0;
-        if (armKind !== 'manual') backupAudio.play().catch(() => {});
-      }
-      setMode(armKind === 'manual' ? 'manual' : 'armed');
+      lastSpotStatus = 'tracking resumed';
+      setMode('manual');
       if (!listenTimer) listenTimer = setInterval(tickListen, LISTEN_MS);
       updateUI();
     }
@@ -3999,27 +3926,9 @@
     $('btnCopyLog').addEventListener('click', () => copyDiagnostics());
     $('btnShareLog').addEventListener('click', () => shareDiagnostics());
 
-    $('btnMain').addEventListener('pointerdown', e => {
-      if (state.mode !== 'idle' || $('btnMain').disabled) return;
-      mainLongPress = false;
-      clearTimeout(mainPressTimer);
-      mainPressTimer = setTimeout(async () => {
-        mainLongPress = true;
-        if (navigator.vibrate) navigator.vibrate(12);
-        await prime('auto');
-      }, LONG_PRESS_MS);
-    });
-    ['pointerup', 'pointerleave', 'pointercancel'].forEach(ev => {
-      $('btnMain').addEventListener(ev, () => clearTimeout(mainPressTimer));
-    });
-
     $('btnMain').addEventListener('click', async () => {
-      if (mainLongPress) {
-        mainLongPress = false;
-        return;
-      }
-      if (state.mode === 'idle') await prime('manual');
-      else if (state.mode === 'primed' || state.mode === 'manual' || state.mode === 'armed' ||
+      if (state.mode === 'idle') await prime();
+      else if (state.mode === 'manual' || state.mode === 'armed' ||
         state.mode === 'cutout' || state.mode === 'seeking') await disarm(true);
       else if (state.mode === 'backing') pauseBackupAndSeek();
     });
@@ -4065,7 +3974,7 @@
     $('bufferDelay').addEventListener('input', e => {
       const next = normalizeTrailMs(+e.target.value);
       state.settings.bufferDelayMs = next;
-      if (armKind === 'manual' && trackingLocked && manualMeasuredTrailMs) {
+      if (trackingLocked && manualMeasuredTrailMs) {
         manualTrailAdjustMs = next - manualMeasuredTrailMs;
         lockedBufferMs = next;
         manualTemplate = null;
