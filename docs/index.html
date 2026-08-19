@@ -391,6 +391,11 @@
       touch-action: pan-y;
       overscroll-behavior: contain;
     }
+    .settings.locked input,
+    .settings.locked select {
+      opacity: 0.4;
+      pointer-events: none;
+    }
     .conf-row {
       display: flex; align-items: center; gap: 10px;
       margin: 6px 0 8px;
@@ -2184,8 +2189,12 @@
       if (settingsLocked) panel.open = true;
       btn.classList.toggle('on', settingsLocked);
       btn.textContent = settingsLocked ? '🔒' : '🔓';
-      btn.title = settingsLocked ? 'Unpin settings' : 'Pin settings open';
+      btn.title = settingsLocked ? 'Unlock settings' : 'Lock settings';
       btn.setAttribute('aria-pressed', settingsLocked ? 'true' : 'false');
+      // Disable/enable all inputs and buttons inside settings (except the lock button itself).
+      panel.querySelectorAll('input, select, button:not(#btnSettingsLock)').forEach(el => {
+        el.disabled = settingsLocked;
+      });
     }
 
     function spotWaitSec() {
