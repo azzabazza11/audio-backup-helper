@@ -1,0 +1,4070 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
+  <meta name="theme-color" content="#f3f0e8" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <meta name="apple-mobile-web-app-title" content="Back Me Up" />
+  <meta name="description" content="Arm a backup audio track, listen via mic, and take over if the main amplifier cuts out." />
+  <link rel="manifest" href="./manifest.webmanifest" />
+  <link rel="icon" href="./icon.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="./icon-192.png" />
+  <title>Back Me Up — Audio Backup Helper</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&family=Outfit:wght@450;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg: #f3f0e8;
+      --paper: #fffcf7;
+      --ink: #161411;
+      --muted: #5f5a53;
+      --line: #ddd6c8;
+      --accent: #123c32;
+      --ok: #1b6b45;
+      --bad: #b42318;
+      --warn: #b54708;
+      --panel: #fffcf7;
+      --safe-t: env(safe-area-inset-top, 0px);
+      --safe-b: env(safe-area-inset-bottom, 0px);
+      --safe-l: env(safe-area-inset-left, 0px);
+      --safe-r: env(safe-area-inset-right, 0px);
+      --radius: 20px;
+      --tap: 48px;
+      --bar-h: 120px;
+    }
+
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    html, body {
+      margin: 0;
+      min-height: 100%;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: "Outfit", system-ui, sans-serif;
+      font-weight: 450;
+      -webkit-user-select: none;
+      user-select: none;
+    }
+    body {
+      padding:
+        calc(12px + var(--safe-t))
+        calc(16px + var(--safe-r))
+        calc(var(--bar-h) + 16px + var(--safe-b))
+        calc(16px + var(--safe-l));
+    }
+    button, input, select, textarea { font: inherit; color: inherit; }
+    button { cursor: pointer; border: 0; background: none; }
+    input, select, textarea, .trigger-log, .sync-line {
+      -webkit-user-select: text;
+      user-select: text;
+    }
+    .mono { font-family: "IBM Plex Mono", ui-monospace, monospace; }
+
+    .topbar {
+      display: flex; align-items: center; gap: 10px;
+      margin-bottom: 14px; min-height: var(--tap);
+    }
+    .topbar h1 {
+      margin: 0; flex: 1;
+      font-family: "Fraunces", Georgia, serif;
+      font-size: 1.55rem; font-weight: 600; letter-spacing: -0.03em;
+    }
+    .topbar-actions {
+      display: flex; align-items: center; gap: 6px; flex-shrink: 0;
+    }
+    .btn.icon-btn {
+      min-height: 40px; min-width: 40px; padding: 0 10px;
+      font-size: 0.82rem; font-weight: 600;
+    }
+    .btn.icon-btn.on { background: var(--accent); color: #fff; border-color: var(--accent); }
+    .brand-mark {
+      width: 42px; height: 42px; border-radius: 14px;
+      background: var(--paper); border: 1px solid var(--line);
+      display: grid; place-items: center; flex-shrink: 0;
+    }
+    .brand-mark svg { width: 26px; height: 26px; }
+
+    .btn {
+      min-height: var(--tap); padding: 0 16px; border-radius: 999px;
+      background: var(--paper); border: 1px solid var(--line); font-weight: 600;
+    }
+    .btn:active { transform: scale(0.98); }
+    .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+    .btn.primary {
+      background: var(--accent); color: #fff; border-color: var(--accent);
+    }
+    .btn.danger {
+      background: var(--bad); color: #fff; border-color: var(--bad);
+    }
+    .btn.ghost { background: transparent; }
+
+    .card {
+      background: var(--paper); border: 1px solid var(--line);
+      border-radius: var(--radius); padding: 16px; margin-bottom: 14px;
+    }
+    .card h2 {
+      margin: 0 0 8px;
+      font-family: "Fraunces", Georgia, serif;
+      font-size: 1.1rem; font-weight: 600;
+    }
+    .hint { color: var(--muted); font-size: 0.92rem; line-height: 1.45; margin: 0; }
+
+    .status-pill {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 8px 14px; border-radius: 999px;
+      background: var(--bg); border: 1px solid var(--line);
+      font-size: 0.88rem; font-weight: 600;
+    }
+    .status-pill .dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: var(--muted); flex-shrink: 0;
+    }
+    .status-pill.waiting .dot { background: var(--warn); animation: pulse 1.6s ease infinite; }
+    .status-pill.listening .dot { background: var(--ok); animation: pulse 1.4s ease infinite; }
+    .status-pill.cutout .dot { background: var(--warn); animation: pulse 0.8s ease infinite; }
+    .status-pill.playing .dot { background: var(--accent); animation: pulse 1s ease infinite; }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.5; transform: scale(0.85); }
+    }
+
+    .track-list {
+      list-style: none; margin: 12px 0 0; padding: 0;
+      max-height: 240px; overflow-y: auto;
+      overscroll-behavior: contain;
+      -webkit-overflow-scrolling: touch;
+      touch-action: pan-y;
+      border: 1px solid var(--line); border-radius: 14px;
+    }
+    .track-list li {
+      display: flex; align-items: center; gap: 10px;
+      padding: 12px 14px; border-bottom: 1px solid var(--line);
+      cursor: pointer; transition: background 0.15s;
+    }
+    .track-list li:last-child { border-bottom: 0; }
+    .track-list li:active { background: var(--bg); }
+    .track-list li.selected {
+      background: rgba(18, 60, 50, 0.08);
+      border-left: 3px solid var(--accent);
+      padding-left: 11px;
+    }
+    .track-list li .name {
+      flex: 1; font-size: 0.92rem; word-break: break-word;
+    }
+    .track-list li .dur {
+      font-size: 0.78rem; color: var(--muted);
+    }
+    .track-list li .fp-tag {
+      flex-shrink: 0; font-size: 0.68rem; font-weight: 600; color: var(--ok);
+    }
+
+    .progress-wrap { margin-top: 14px; }
+    .progress-bar {
+      position: relative;
+      height: 8px; background: var(--bg); border-radius: 999px;
+      border: 1px solid var(--line); overflow: visible;
+    }
+    .progress-fill {
+      height: 100%; width: 0%; background: var(--accent);
+      border-radius: 999px; transition: width 0.25s linear;
+    }
+    .progress-room {
+      position: absolute; top: -3px; width: 3px; height: 14px;
+      background: var(--warn); border-radius: 2px;
+      transform: translateX(-50%); pointer-events: none;
+      box-shadow: 0 0 0 1px var(--paper);
+    }
+    .progress-meta {
+      display: flex; justify-content: space-between;
+      margin-top: 6px; font-size: 0.82rem; color: var(--muted);
+    }
+    .clock-dual {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 6px 16px;
+      margin-top: 8px;
+      padding: 10px 12px;
+      background: var(--bg);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+    }
+    .clock-dual .clock-row {
+      display: flex; align-items: baseline; justify-content: space-between; gap: 10px;
+    }
+    .clock-label {
+      font-size: 0.78rem; font-weight: 600; color: var(--muted);
+    }
+    .clock-val {
+      font-size: 0.95rem; font-weight: 600; color: var(--accent);
+    }
+    .clock-val.room { color: var(--warn); }
+    .clock-dual .clock-total {
+      grid-column: 1 / -1;
+      text-align: right;
+      font-size: 0.78rem; color: var(--muted);
+      margin-top: 2px;
+    }
+    .trail-row {
+      display: flex; align-items: center; justify-content: center; gap: 10px;
+      margin-top: 12px; padding: 10px 12px;
+      background: var(--bg); border: 1px solid var(--line);
+      border-radius: 14px;
+    }
+    .trail-label {
+      font-size: 0.78rem; font-weight: 600; color: var(--muted);
+      text-transform: uppercase; letter-spacing: 0.04em;
+      margin-right: 4px;
+    }
+    .trail-btn {
+      min-width: 44px; min-height: 44px; padding: 0;
+      border-radius: 12px; border: 1px solid var(--line);
+      background: var(--paper); font-size: 1.35rem; line-height: 1;
+      color: var(--accent); font-weight: 600;
+      touch-action: manipulation; user-select: none;
+    }
+    .trail-btn:active { background: var(--bg); }
+    .trail-val {
+      min-width: 4.5em; text-align: center;
+      font-size: 1.05rem; font-weight: 600; color: var(--ink);
+    }
+    .bottom-hint {
+      margin: 0 0 8px; text-align: center;
+      font-size: 0.78rem; color: var(--muted);
+    }
+    .confidence {
+      margin-top: 10px;
+      padding: 10px 12px;
+      background: var(--bg);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+    }
+    .confidence-head {
+      display: flex; align-items: baseline; gap: 8px;
+    }
+    .confidence-label {
+      font-size: 0.78rem; font-weight: 600; color: var(--muted);
+      text-transform: uppercase; letter-spacing: 0.04em;
+    }
+    .confidence-word {
+      margin-left: auto; font-size: 0.95rem; font-weight: 700;
+      color: var(--accent);
+    }
+    .confidence.ok .confidence-word { color: var(--ok); }
+    .confidence.warn .confidence-word { color: var(--warn); }
+    .confidence.bad .confidence-word { color: var(--bad); }
+    .confidence-pct {
+      font-size: 0.92rem; font-weight: 600; color: var(--ink); min-width: 2.6em; text-align: right;
+    }
+    .confidence-bar {
+      position: relative; height: 8px; margin-top: 8px;
+      background: var(--paper); border: 1px solid var(--line); border-radius: 999px;
+      overflow: hidden;
+    }
+    .confidence-fill {
+      height: 100%; width: 0%; background: var(--accent);
+      border-radius: 999px; transition: width 0.25s linear, background 0.25s;
+    }
+    .confidence.ok .confidence-fill { background: var(--ok); }
+    .confidence.warn .confidence-fill { background: var(--warn); }
+    .confidence.bad .confidence-fill { background: var(--bad); }
+    .confidence-hint {
+      margin: 6px 0 0; font-size: 0.8rem; color: var(--muted); line-height: 1.35;
+    }
+
+    .settings {
+      margin-top: 8px;
+    }
+    .settings summary {
+      cursor: pointer; font-weight: 600; font-size: 0.9rem;
+      padding: 8px 0; color: var(--muted);
+      list-style: none;
+      display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    }
+    .settings summary::-webkit-details-marker { display: none; }
+    .settings summary .summary-label { flex: 1; }
+    .settings.locked summary { cursor: default; }
+    .btn-lock {
+      min-height: 36px; min-width: 36px; padding: 0;
+      border-radius: 10px; border: 1px solid var(--line);
+      background: var(--paper); font-size: 1rem; line-height: 1;
+      flex-shrink: 0;
+    }
+    .btn-lock.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+    .setting-row {
+      display: flex; align-items: center; gap: 12px;
+      margin: 10px 0;
+    }
+    .setting-row label { flex: 1; font-size: 0.88rem; }
+    .setting-row input[type="range"] { flex: 1.2; accent-color: var(--accent); }
+    .setting-row .val {
+      min-width: 52px; text-align: right;
+      font-size: 0.82rem; color: var(--muted);
+    }
+
+    .bottom-bar {
+      position: fixed; left: 0; right: 0; bottom: 0; z-index: 10;
+      padding:
+        12px calc(16px + var(--safe-r))
+        calc(12px + var(--safe-b))
+        calc(16px + var(--safe-l));
+      background: rgba(243, 240, 232, 0.92);
+      backdrop-filter: blur(12px);
+      border-top: 1px solid var(--line);
+    }
+    .bottom-bar .btn {
+      width: 100%; min-height: 56px; font-size: 1.05rem;
+      border-radius: 16px;
+    }
+
+    .overlay {
+      display: none; position: fixed; inset: 0; z-index: 100;
+      background: rgba(22, 20, 17, 0.55);
+      align-items: center; justify-content: center;
+      padding: 24px;
+    }
+    .overlay.show { display: flex; }
+    .overlay-card {
+      background: var(--paper); border-radius: var(--radius);
+      padding: 28px 24px; max-width: 360px; width: 100%;
+      text-align: center; border: 1px solid var(--line);
+      animation: fadeUp 0.25s ease;
+    }
+    @keyframes fadeUp {
+      from { opacity: 0; transform: translateY(12px); }
+      to { opacity: 1; transform: none; }
+    }
+    .overlay-card h2 {
+      margin: 0 0 8px;
+      font-family: "Fraunces", Georgia, serif;
+      font-size: 1.35rem;
+    }
+    .overlay-card p {
+      margin: 0 0 20px; color: var(--muted); line-height: 1.45;
+    }
+    .overlay-card .btn { width: 100%; min-height: 56px; border-radius: 16px; font-size: 1.05rem; }
+
+    .empty-state {
+      text-align: center; padding: 24px 12px; color: var(--muted);
+    }
+
+    .mic-meter {
+      position: relative; height: 8px; background: var(--bg); border-radius: 999px;
+      border: 1px solid var(--line); overflow: hidden; margin-top: 10px;
+    }
+    .mic-meter-fill {
+      height: 100%; width: 0%; background: var(--ok);
+      border-radius: 999px; transition: width 0.08s linear;
+    }
+    .mic-meter-mark {
+      position: absolute; top: 0; bottom: 0; width: 2px;
+      background: var(--warn); transform: translateX(-1px); pointer-events: none;
+    }
+    .cal-meter {
+      position: relative; flex: 1.2; height: 10px;
+      background: var(--bg); border: 1px solid var(--line);
+      border-radius: 999px; overflow: hidden;
+    }
+    .cal-fill {
+      height: 100%; width: 0%; background: var(--ok);
+      border-radius: 999px; transition: width 0.12s linear;
+    }
+    .cal-mark {
+      position: absolute; top: 0; bottom: 0; width: 2px;
+      background: var(--warn); transform: translateX(-1px);
+    }
+    .cal-hint { margin: 0 0 10px; font-size: 0.8rem; }
+    .sync-line {
+      margin: 10px 0 0;
+      font-size: 0.88rem;
+      color: var(--muted);
+      line-height: 1.4;
+    }
+    .sync-line strong { color: var(--ink); font-weight: 600; }
+    .fp-viz { margin-top: 12px; }
+    .trigger-box { margin-top: 12px; }
+    .conf-row {
+      display: flex; align-items: center; gap: 10px;
+      margin: 6px 0 8px;
+    }
+    .conf-row .fp-label { margin: 0; flex-shrink: 0; }
+    .conf-meter {
+      flex: 1; height: 10px;
+      background: var(--bg); border: 1px solid var(--line);
+      border-radius: 999px; overflow: hidden;
+    }
+    .conf-fill {
+      height: 100%; width: 0%;
+      border-radius: 999px;
+      background: var(--muted);
+      transition: width 0.2s linear, background 0.2s linear;
+    }
+    .conf-fill.ok { background: var(--ok); }
+    .conf-fill.warn { background: var(--warn); }
+    .conf-fill.bad { background: var(--bad); }
+    .conf-pct {
+      min-width: 2.6em; text-align: right;
+      font-size: 0.82rem; font-weight: 600; color: var(--ink);
+    }
+    .trigger-log {
+      margin: 0; padding: 8px 12px 8px 28px;
+      background: var(--bg); border: 1px solid var(--line);
+      border-radius: 8px; font-size: 0.72rem; color: var(--muted);
+      line-height: 1.45; max-height: 220px; overflow-y: auto;
+      overscroll-behavior: contain;
+      -webkit-overflow-scrolling: touch;
+      touch-action: pan-y;
+    }
+    .trigger-log li { margin: 0 0 6px; }
+    .trigger-log li.hit { color: var(--ok); }
+    .trigger-log li.miss { color: var(--bad); }
+    .trigger-log li.lock { color: var(--ink); font-weight: 600; }
+    .trigger-log li.spot { color: var(--warn); }
+    .trigger-actions { display: flex; gap: 8px; margin-top: 8px; }
+    .trigger-actions .btn { min-height: 44px; flex: 1; font-size: 0.88rem; }
+    .fp-meta {
+      font-size: 0.75rem; color: var(--muted); margin: 0 0 8px;
+    }
+    .fp-label {
+      font-size: 0.72rem; font-weight: 600; color: var(--muted);
+      margin: 6px 0 4px; text-transform: uppercase; letter-spacing: 0.04em;
+    }
+    .fp-lane {
+      position: relative; height: 68px;
+      background: var(--bg); border: 1px solid var(--line);
+      border-radius: 8px; overflow: hidden;
+    }
+    .fp-lane canvas { display: block; width: 100%; height: 100%; }
+    .fp-burst {
+      position: absolute; bottom: 4px;
+      border-radius: 3px 3px 1px 1px; min-width: 3px;
+      background: var(--accent);
+    }
+    .fp-burst.mic { background: var(--ok); }
+    .fp-burst.matched { box-shadow: 0 0 0 1px var(--ink); }
+    .fp-burst.skipped { opacity: 0.35; background: var(--muted); }
+    .ver {
+      margin: 8px 0 0;
+      color: var(--muted);
+      font-size: 0.78rem;
+      opacity: 0.7;
+      text-align: center;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation-duration: 0.01ms !important;
+        transition-duration: 0.01ms !important;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand-mark" aria-hidden="true">
+      <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <rect x="3" y="10" width="3" height="8" rx="1" fill="#123c32"/>
+        <rect x="8" y="7" width="3" height="11" rx="1" fill="#123c32"/>
+        <rect x="13" y="9" width="3" height="9" rx="1" fill="#123c32"/>
+        <rect x="18" y="5" width="3" height="13" rx="1" fill="#123c32"/>
+      </svg>
+    </div>
+    <h1>Back Me Up</h1>
+    <div class="topbar-actions">
+      <button type="button" class="btn ghost icon-btn" id="btnViz" title="Show fingerprint" aria-pressed="false">Viz</button>
+      <button type="button" class="btn ghost icon-btn" id="btnDebug" title="Show debug overlay" aria-pressed="false">Debug</button>
+      <button type="button" class="btn ghost" id="btn-install" hidden>Install</button>
+      <button type="button" class="btn ghost" id="btnReload" title="Reload app">↻</button>
+    </div>
+  </header>
+
+  <section class="card" id="setupCard">
+    <h2>Audio folder</h2>
+    <p class="hint" id="folderHint">Load the folder of instruction audio. Pick the track, then arm backup. The first ~30 s from the first sound (leading silence is skipped) becomes a peak-hash fingerprint. The mic records short clips; only the current clip is shown on Heard. Matching clips count toward lock — talking and other room noise is ignored. Cutout only fires if the mic goes quiet where the file still has speech. The folder and fingerprints stay on this phone.</p>
+    <button type="button" class="btn primary" id="btnLoadFolder" style="margin-top:12px;width:100%">Load audio folder</button>
+    <input type="file" id="folderInput" webkitdirectory multiple accept="audio/*" hidden />
+    <ul class="track-list" id="trackList" hidden></ul>
+    <p class="empty-state" id="emptyTracks">No folder loaded yet.</p>
+  </section>
+
+  <section class="card" id="statusCard" hidden>
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
+      <h2 style="margin:0">Status</h2>
+      <span class="status-pill" id="statusPill"><span class="dot"></span><span id="statusText">Ready</span></span>
+    </div>
+    <p class="hint" id="selectedTrackLabel" style="margin-top:10px"></p>
+    <div class="progress-wrap">
+      <div class="progress-bar">
+        <div class="progress-fill" id="progressFill"></div>
+        <div class="progress-room" id="progressRoomMark" hidden title="Amp / room position"></div>
+      </div>
+      <div class="progress-meta" id="progressMetaSingle">
+        <span class="mono" id="timeCurrent">0:00</span>
+        <span class="mono" id="timeTotal">0:00</span>
+      </div>
+      <div class="clock-dual" id="progressMetaDual" hidden>
+        <div class="clock-row">
+          <span class="clock-label">Amp</span>
+          <span class="mono clock-val room" id="timeRoom">0:00</span>
+        </div>
+        <div class="clock-row">
+          <span class="clock-label">Backup</span>
+          <span class="mono clock-val" id="timeBackup">0:00</span>
+        </div>
+        <div class="clock-total mono" id="timeTotalDual">Track length —</div>
+      </div>
+    </div>
+    <div class="trail-row" id="trailRow" hidden>
+      <span class="trail-label">Trail</span>
+      <button type="button" class="trail-btn" id="btnTrailDown" aria-label="Decrease trail time">−</button>
+      <span class="mono trail-val" id="trailVal">2 s</span>
+      <button type="button" class="trail-btn" id="btnTrailUp" aria-label="Increase trail time">+</button>
+    </div>
+    <div class="mic-meter" id="micMeterWrap" hidden>
+      <div class="mic-meter-fill" id="micMeterFill"></div>
+      <div class="mic-meter-mark" id="micMeterMark"></div>
+    </div>
+    <p class="sync-line" id="syncLine" hidden></p>
+    <div class="fp-viz" id="fpViz" hidden>
+      <p class="fp-meta mono" id="fpMeta"></p>
+      <div class="fp-label" id="fpFileLabel">File fingerprint</div>
+      <div class="fp-lane" id="fpFileLane" aria-hidden="true"><canvas id="fpFileCanvas"></canvas></div>
+      <div class="fp-label" id="fpMicLabel">Heard</div>
+      <div class="fp-lane" id="fpMicLane" aria-hidden="true"><canvas id="fpMicCanvas"></canvas></div>
+    </div>
+    <div class="trigger-box" id="triggerBox" hidden>
+      <div class="conf-row">
+        <span class="fp-label">Clip confidence</span>
+        <div class="conf-meter" role="meter" aria-label="Clip confidence" aria-valuemin="0" aria-valuemax="100" id="clipConfMeter">
+          <div class="conf-fill" id="clipConfFill"></div>
+        </div>
+        <span class="mono conf-pct" id="clipConfPct">—</span>
+      </div>
+      <p class="fp-meta mono" id="triggerGates"></p>
+      <ol class="trigger-log" id="triggerLog"></ol>
+      <p class="fp-meta mono" id="triggerVerdict"></p>
+      <div class="trigger-actions">
+        <button type="button" class="btn" id="btnCopyLog">Copy log</button>
+        <button type="button" class="btn" id="btnShareLog">Share log</button>
+      </div>
+    </div>
+  </section>
+
+  <details class="settings card" id="settingsPanel">
+    <summary>
+      <span class="summary-label">Settings</span>
+      <button type="button" class="btn-lock" id="btnSettingsLock" title="Pin settings open" aria-pressed="false" aria-label="Pin settings open">🔓</button>
+    </summary>
+    <div class="setting-row">
+      <label for="bufferDelay">Buffer delay (backup trails the amp)</label>
+      <input type="range" id="bufferDelay" min="1000" max="30000" step="1000" value="2000" />
+      <span class="val mono" id="bufferDelayVal">2 s</span>
+    </div>
+    <div class="setting-row">
+      <label for="silenceThreshold">Mic silence (RMS below this = quiet)</label>
+      <input type="range" id="silenceThreshold" min="0.005" max="0.08" step="0.005" value="0.02" />
+      <span class="val mono" id="silenceThresholdVal">0.02</span>
+    </div>
+    <div class="setting-row">
+      <span style="flex:1;font-size:0.88rem">Room noise now</span>
+      <div class="cal-meter" id="calMeter" title="Green = current room. Orange mark = silence gate.">
+        <div class="cal-fill" id="calRoomFill"></div>
+        <div class="cal-mark" id="calGateMark"></div>
+      </div>
+      <span class="val mono" id="calRoomVal">—</span>
+    </div>
+    <p class="hint cal-hint" id="calHint">While waiting, the gate auto-sets just above room noise. Drag the slider to lock it.</p>
+    <div class="setting-row">
+      <label for="silenceDuration">Cutout after unexpected silence</label>
+      <input type="range" id="silenceDuration" min="400" max="30000" step="200" value="800" />
+      <span class="val mono" id="silenceDurationVal">800 ms</span>
+    </div>
+    <p class="hint cal-hint" id="cutoutHint">Counts quiet time while the file still has speech. Brief mic blips under ~1.2 s do not reset the timer. After Keep listening, the app re-checks sync before cutout can fire again.</p>
+    <div class="setting-row">
+      <label for="fingerprintSec">File fingerprint length</label>
+      <input type="range" id="fingerprintSec" min="15" max="30" step="1" value="30" />
+      <span class="val mono" id="fingerprintSecVal">30 s</span>
+    </div>
+    <div class="setting-row">
+      <label for="clipSec">Mic clip to match</label>
+      <input type="range" id="clipSec" min="2" max="8" step="1" value="4" />
+      <span class="val mono" id="clipSecVal">4 s</span>
+    </div>
+    <div class="setting-row">
+      <label for="matchThreshold">Clip match score</label>
+      <input type="range" id="matchThreshold" min="0.25" max="0.85" step="0.05" value="0.5" />
+      <span class="val mono" id="matchThresholdVal">0.50</span>
+    </div>
+    <p class="hint cal-hint" id="lockNeedHint">A clip is a hit only if rare-hash score, coverage of hashes that exist in the file, and file-pause quiet all pass. Lock needs two hits in a row plus the hold time. Talking should fail; the real file should pass by a wide margin.</p>
+    <div class="setting-row">
+      <label for="confirmHold">Hold match before lock</label>
+      <input type="range" id="confirmHold" min="3000" max="10000" step="500" value="5000" />
+      <span class="val mono" id="confirmHoldVal">5 s</span>
+    </div>
+    <div class="setting-row">
+      <label for="patternBlur">Burst-edge blur</label>
+      <input type="range" id="patternBlur" min="0" max="400" step="25" value="150" />
+      <span class="val mono" id="patternBlurVal">150 ms</span>
+    </div>
+    <p class="hint cal-hint" id="patternBlurHint">Second layer: quiet gaps in the file must also be quiet on the mic. Blur forgives early/late burst edges. Raise if the real amp barely misses; lower if talking still hits.</p>
+    <div class="setting-row">
+      <label for="gapConfidenceWeight">Gap weight in confidence</label>
+      <input type="range" id="gapConfidenceWeight" min="0.05" max="0.5" step="0.05" value="0.25" />
+      <span class="val mono" id="gapConfidenceWeightVal">0.25</span>
+    </div>
+    <div class="setting-row">
+      <label for="gapConfidenceBoost">Gap confidence boost</label>
+      <input type="range" id="gapConfidenceBoost" min="0.5" max="2.5" step="0.1" value="1.3" />
+      <span class="val mono" id="gapConfidenceBoostVal">1.3×</span>
+    </div>
+    <p class="hint cal-hint">Debug tuning for the confidence meter: raise these when quiet gaps and patch timing line up clearly even if raw loudness-sensitive hashes score low.</p>
+    <button type="button" class="btn" id="btnBlurFromFile" style="width:100%;margin-top:8px">Set blur from this file’s pauses</button>
+    <button type="button" class="btn" id="btnForgetLibrary" style="width:100%;margin-top:8px">Forget saved folder</button>
+    <p class="hint cal-hint">Fingerprints stay until you clear them. Forgetting the folder does not delete stored fingerprints.</p>
+    <button type="button" class="btn" id="btnForgetFingerprints" style="width:100%;margin-top:8px">Clear stored fingerprints</button>
+  </details>
+
+  <p class="ver mono" id="appVer">v1.5.6</p>
+
+  <div class="bottom-bar">
+    <p class="bottom-hint" id="mainBtnHint">Press to start tracking · Take Over when ready</p>
+    <button type="button" class="btn primary" id="btnMain" disabled>Back me up</button>
+  </div>
+
+  <div class="overlay" id="cutoutOverlay" role="dialog" aria-labelledby="cutoutTitle">
+    <div class="overlay-card">
+      <h2 id="cutoutTitle">Main audio stopped</h2>
+      <p>Mic went quiet where this file still has speech. Take over from the synced position?</p>
+      <button type="button" class="btn primary" id="btnTakeOver">Take Over</button>
+      <button type="button" class="btn" id="btnDismissCutout" style="margin-top:10px">Keep listening</button>
+    </div>
+  </div>
+
+  <script>
+    const $ = id => document.getElementById(id);
+    const APP_VER = '1.5.6';
+
+    const ENVELOPE_RATE = 20;
+    const TRAIL_STEP_MS = 1000;
+    const TRAIL_HOLD_STEP_MS = 1000;
+    const LISTEN_MS = 50;
+    const MIN_BURST_SEC = 0.18;
+    const MIN_LOCK_SPEECH_SEC = 0.4;
+    const MIN_LOCK_BURSTS = 3;
+    const SHAPE_POINTS = 16;
+    const MAX_MATCH_BURSTS = 12;
+    const FILE_END_THRESHOLD = 0.97;
+    const FILE_LOOKAHEAD_SEC = 0.8;
+    const CONFIRM_GRACE_MS = 2500;
+    const MIN_LOCK_CLIPS = 2;
+    const MIN_CLIP_COVERAGE = 0.28;
+    const MIN_CLIP_CONTRAST = 4;
+    const MIN_GAP_SCORE = 0.62;
+    const MAX_CLOCK_DRIFT = 1.25;
+    const CUTOUT_BLIP_MS = 1200;
+    const CUTOUT_COOLDOWN_MS = 12000;
+    const CUTOUT_FAIL_COOLDOWN_MS = 20000;
+    const STRONG_LOCK_SCORE = 0.98;
+    const STRONG_LOCK_COVERAGE = 0.55;
+    const STRONG_LOCK_MIN_MS = 6000;
+    const STRONG_LOCK_MAX_MS = 20000;
+    const STRONG_LOCK_DECAY_MS = 2500;
+    const STRONG_LOCK_SILENCE_MULT = 2.5;
+    const HOLD_CONTINUE_RATIO = 0.7;
+    const ALIGN_MATCH_FLOOR = 0.28;
+    const SILENCE_MIN = 0.005;
+    const SILENCE_MAX = 0.08;
+    const AMBIENT_SAMPLES = 40;
+    const AMBIENT_MULT = 2.4;
+    const MIC_METER_MAX = 0.15;
+    const FP_SR = 16000;
+    const FP_FFT = 2048;
+    const FP_HOP = 512;
+    const FP_PEAKS = 5;
+    const FP_FAN = 6;
+    const FP_DT_MAX = 35;
+    const FP_BIN_Q = 3;
+    const FP_HOP_SEC = FP_HOP / FP_SR;
+    const SPOT_WAIT_MS = 60000;
+    const SEEK_RADIUS_SEC = 30;
+    const SEEK_WINDOW_MAX = 90;
+    const SEEK_RADIUS_WIDE_SEC = 60;
+    const MANUAL_WIDE_MISS_THRESH = 3;
+    const FP_SCROLL_LEAD = 0.32;
+    const SPOT_PREROLL = 0.35;
+    const FP_CACHE_VER = 2;
+    const IDB_NAME = 'back-me-up';
+    const IDB_VER = 1;
+
+    const state = {
+      tracks: [],
+      selectedId: null,
+      mode: 'idle',
+      analysing: false,
+      settings: {
+        bufferDelayMs: 2000,
+        silenceThreshold: 0.02,
+        silenceDurationMs: 800,
+        fingerprintSec: 30,
+        clipSec: 4,
+        matchThreshold: 0.5,
+        confirmHoldMs: 5000,
+        patternBlurMs: 150,
+        gapConfidenceWeight: 0.25,
+        gapConfidenceBoost: 1.3,
+        showDebug: false,
+        settingsLocked: false
+      }
+    };
+
+    let audioCtx = null;
+    let micStream = null;
+    let micSource = null;
+    let analyser = null;
+    let timeDomainBuf = null;
+    let fileBuffer = null;
+    let fileEnvelope = null;
+    let fileSpeechThreshold = 0.08;
+    let fileDuration = 0;
+    let backupAudio = null;
+    let wakeLock = null;
+
+    let trackedPosition = 0;
+    let lastSpeechAt = 0;
+    let silenceSince = null;
+    let unexpectedSilenceMs = 0;
+    let micSpeechStartedAt = null;
+    let cutoutCooldownUntil = 0;
+    let cutoutVerifyPending = false;
+    let cutoutVerifyMode = false;
+    let cutoutVerifyStartedAt = 0;
+    let seekStopPos = 0;
+    let seekStopAt = 0;
+    let seekTemplate = null;
+    let seekWinStart = -1;
+    let seekWinDur = 0;
+    let lastMatchScore = 0;
+    let lastMatchGated = true;
+    let lastMatchBurstCount = 0;
+    let lastMatchAlign = { pairs: [], skippedMic: [], skippedFile: [] };
+    let strongLockMs = 0;
+    let inLogicalSync = false;
+    let fileExpectsSpeech = false;
+    let fileBursts = [];
+    let startBursts = [];
+    let liveBurst = null;
+    let completedMicBursts = [];
+    let listenTimer = null;
+    let ambientRing = [];
+    let ambientRms = 0;
+    let silenceManual = false;
+    let confirmStartedAt = null;
+    let confirmPositionSec = 0;
+    let confirmHeldMs = 0;
+    let confirmLastTick = 0;
+    let confirmBadSince = null;
+    let lockPositionSec = 0;
+    let lockClockAt = 0;
+    let lockedBufferMs = 0;
+    let manualMeasuredTrailMs = 0;
+    let manualTrailAdjustMs = 0;
+    let trackingLocked = false;
+    let pendingPlayTimer = null;
+    let captureNode = null;
+    let captureGain = null;
+    let templateIndex = null;
+    let templateHopSec = 0;
+    let clipCollecting = false;
+    let clipParts = [];
+    let clipLength = 0;
+    let clipBusy = false;
+    let lastClipHits = 0;
+    let lastClipOffset = 0;
+    let lastClipStatus = 'waiting';
+    let lastClipContrast = 0;
+    let lastClipCoverage = 0;
+    let lastClipHashes = 0;
+    let lastClipLooked = 0;
+    let lastClipFail = '';
+    let lastClipGapScore = 0;
+    let lastClipGapBit = '';
+    let lastHitOffset = 0;
+    let lastHitPerf = 0;
+    let hitStreak = 0;
+    let clipLog = [];
+    let lockReason = '';
+    let lastClipPerfStart = 0;
+    let alignPerfAt = 0;
+    let alignFileAt = 0;
+    let hasAlign = false;
+    let clipEnv = null;
+    let clipEnvFileAt = 0;
+    let micEnvT = [];
+    let micEnvV = [];
+    let spotMode = false;
+    let spotFileStart = 0;
+    let spotChecksDone = 0;
+    let nextSpotAt = 0;
+    let lastSpotStatus = '';
+    let dirHandle = null;
+    let folderName = '';
+    let pendingDirHandle = null;
+    let fpIndexBusy = false;
+    let fpGen = 0;
+    let showDebug = false;
+    let showViz = false;
+    let settingsLocked = false;
+    let manualStartedAt = 0;
+    let manualBaseSec = 0;
+    let manualTemplate = null;
+    let manualWinStart = -1;
+    let manualWinDur = 0;
+    let manualWinWide = false;
+    let manualMissStreak = 0;
+    const fpInflight = new Map();
+
+    function fmtTime(sec) {
+      if (!isFinite(sec) || sec < 0) sec = 0;
+      const m = Math.floor(sec / 60);
+      const s = Math.floor(sec % 60);
+      return m + ':' + String(s).padStart(2, '0');
+    }
+
+    function fmtSettingMs(ms) {
+      if (ms >= 1000) {
+        const sec = ms / 1000;
+        return (ms % 1000 === 0 ? sec.toFixed(0) : sec.toFixed(1)) + ' s';
+      }
+      return ms + ' ms';
+    }
+
+    function normalizeTrailMs(ms) {
+      return Math.max(1000, Math.min(30000, Math.round(ms / 1000) * 1000));
+    }
+
+    function fmtTrailMs(ms) {
+      return Math.round(normalizeTrailMs(ms) / 1000) + ' s';
+    }
+
+    function noteStrongLock(judged, result, clipMs) {
+      const strong = judged.ok && result &&
+        (result.score || 0) >= STRONG_LOCK_SCORE &&
+        (judged.coverage || 0) >= STRONG_LOCK_COVERAGE;
+      if (strong) {
+        strongLockMs = Math.min(STRONG_LOCK_MAX_MS, strongLockMs + clipMs);
+      } else {
+        strongLockMs = Math.max(0, strongLockMs - STRONG_LOCK_DECAY_MS);
+      }
+    }
+
+    function cutoutTriggerMs() {
+      if (strongLockMs >= STRONG_LOCK_MIN_MS) {
+        return Math.max(
+          state.settings.silenceDurationMs + 2000,
+          Math.round(state.settings.silenceDurationMs * STRONG_LOCK_SILENCE_MULT)
+        );
+      }
+      return state.settings.silenceDurationMs;
+    }
+
+    function isAudioFile(file) {
+      return /^audio\//.test(file.type || '') || /\.(mp3|wav|m4a|aac|ogg|flac|webm)$/i.test(file.name);
+    }
+
+    function trackIdFor(file) {
+      return [file.name, file.size, file.lastModified || 0].join('|');
+    }
+
+    function fpStoreKey(file) {
+      return trackIdFor(file) + '|' + state.settings.fingerprintSec + '|' + FP_CACHE_VER;
+    }
+
+    function idbOpen() {
+      return new Promise((resolve, reject) => {
+        const req = indexedDB.open(IDB_NAME, IDB_VER);
+        req.onupgradeneeded = () => {
+          const db = req.result;
+          if (!db.objectStoreNames.contains('kv')) db.createObjectStore('kv');
+          if (!db.objectStoreNames.contains('fingerprints')) db.createObjectStore('fingerprints');
+        };
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+      });
+    }
+
+    function idbOp(store, mode, fn) {
+      return idbOpen().then(db => new Promise((resolve, reject) => {
+        const tx = db.transaction(store, mode);
+        const os = tx.objectStore(store);
+        const req = fn(os);
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+      }));
+    }
+
+    const kvGet = key => idbOp('kv', 'readonly', os => os.get(key));
+    const kvSet = (key, val) => idbOp('kv', 'readwrite', os => os.put(val, key));
+    const kvDel = key => idbOp('kv', 'readwrite', os => os.delete(key));
+    const fpGet = key => idbOp('fingerprints', 'readonly', os => os.get(key));
+    const fpPut = (key, val) => idbOp('fingerprints', 'readwrite', os => os.put(val, key));
+    function fpClear() {
+      return idbOpen().then(db => new Promise((resolve, reject) => {
+        const tx = db.transaction('fingerprints', 'readwrite');
+        tx.objectStore('fingerprints').clear();
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+      }));
+    }
+
+    function clampSetting(n, lo, hi) {
+      const v = +n;
+      if (!isFinite(v)) return lo;
+      return Math.min(hi, Math.max(lo, v));
+    }
+
+    let saveSettingsTimer = null;
+    function scheduleSaveSettings() {
+      clearTimeout(saveSettingsTimer);
+      saveSettingsTimer = setTimeout(() => {
+        kvSet('settings', {
+          bufferDelayMs: state.settings.bufferDelayMs,
+          silenceThreshold: state.settings.silenceThreshold,
+          silenceDurationMs: state.settings.silenceDurationMs,
+          fingerprintSec: state.settings.fingerprintSec,
+          clipSec: state.settings.clipSec,
+          matchThreshold: state.settings.matchThreshold,
+          confirmHoldMs: state.settings.confirmHoldMs,
+          patternBlurMs: state.settings.patternBlurMs,
+          gapConfidenceWeight: state.settings.gapConfidenceWeight,
+          gapConfidenceBoost: state.settings.gapConfidenceBoost,
+          showDebug: !!showDebug,
+          showViz: !!showViz,
+          settingsLocked: !!settingsLocked,
+          silenceManual: !!silenceManual
+        }).catch(() => {});
+      }, 200);
+    }
+
+    function applySettingsToUi() {
+      const s = state.settings;
+      $('bufferDelay').value = String(s.bufferDelayMs);
+      $('bufferDelayVal').textContent = fmtSettingMs(s.bufferDelayMs);
+      updateTrailUi();
+      $('silenceThreshold').value = String(s.silenceThreshold);
+      $('silenceThresholdVal').textContent = s.silenceThreshold.toFixed(3);
+      $('silenceDuration').value = String(s.silenceDurationMs);
+      $('silenceDurationVal').textContent = fmtSettingMs(s.silenceDurationMs);
+      $('fingerprintSec').value = String(s.fingerprintSec);
+      $('fingerprintSecVal').textContent = s.fingerprintSec + ' s';
+      $('clipSec').value = String(s.clipSec);
+      $('clipSecVal').textContent = s.clipSec + ' s';
+      $('matchThreshold').value = String(s.matchThreshold);
+      $('matchThresholdVal').textContent = s.matchThreshold.toFixed(2);
+      $('confirmHold').value = String(s.confirmHoldMs);
+      $('confirmHoldVal').textContent = fmtSettingMs(s.confirmHoldMs);
+      $('patternBlur').value = String(s.patternBlurMs);
+      $('patternBlurVal').textContent = Math.round(s.patternBlurMs) + ' ms';
+      $('gapConfidenceWeight').value = String(s.gapConfidenceWeight);
+      $('gapConfidenceWeightVal').textContent = s.gapConfidenceWeight.toFixed(2);
+      $('gapConfidenceBoost').value = String(s.gapConfidenceBoost);
+      $('gapConfidenceBoostVal').textContent = s.gapConfidenceBoost.toFixed(1) + '×';
+      updateCalibratorUi();
+    }
+
+    async function restoreSettings() {
+      try {
+        const saved = await kvGet('settings');
+        if (!saved || typeof saved !== 'object') return;
+        const s = state.settings;
+        if (saved.bufferDelayMs != null) s.bufferDelayMs = normalizeTrailMs(saved.bufferDelayMs);
+        if (saved.silenceThreshold != null) s.silenceThreshold = clampSetting(saved.silenceThreshold, SILENCE_MIN, SILENCE_MAX);
+        if (saved.silenceDurationMs != null) s.silenceDurationMs = clampSetting(saved.silenceDurationMs, 400, 30000);
+        if (saved.fingerprintSec != null) s.fingerprintSec = clampSetting(saved.fingerprintSec, 15, 30);
+        if (saved.clipSec != null) s.clipSec = clampSetting(saved.clipSec, 2, 8);
+        if (saved.matchThreshold != null) s.matchThreshold = clampSetting(saved.matchThreshold, 0.25, 0.85);
+        if (saved.confirmHoldMs != null) s.confirmHoldMs = clampSetting(saved.confirmHoldMs, 3000, 10000);
+        if (saved.patternBlurMs != null) s.patternBlurMs = clampSetting(saved.patternBlurMs, 0, 400);
+        if (saved.gapConfidenceWeight != null) s.gapConfidenceWeight = clampSetting(saved.gapConfidenceWeight, 0.05, 0.5);
+        if (saved.gapConfidenceBoost != null) s.gapConfidenceBoost = clampSetting(saved.gapConfidenceBoost, 0.5, 2.5);
+        if (saved.showDebug != null) showDebug = !!saved.showDebug;
+        if (saved.showViz != null) showViz = !!saved.showViz;
+        if (saved.settingsLocked != null) settingsLocked = !!saved.settingsLocked;
+        if (saved.silenceManual) silenceManual = true;
+        applySettingsToUi();
+        applyDebugUi();
+        applyVizUi();
+        applySettingsLockUi();
+      } catch (err) {
+        console.warn('Could not restore settings', err);
+      }
+    }
+
+    function packTemplate(template) {
+      const packed = [];
+      template.index.forEach((times, hash) => {
+        packed.push(hash, times.length);
+        for (let i = 0; i < times.length; i++) packed.push(times[i]);
+      });
+      return {
+        ver: FP_CACHE_VER,
+        fingerprintSec: state.settings.fingerprintSec,
+        hashCount: template.hashCount,
+        peakCount: template.peakCount,
+        duration: template.duration,
+        originSec: template.originSec || 0,
+        packed: new Int32Array(packed)
+      };
+    }
+
+    function unpackTemplate(row) {
+      const index = new Map();
+      const packed = row.packed;
+      let i = 0;
+      while (i < packed.length) {
+        const hash = packed[i++];
+        const n = packed[i++];
+        const times = [];
+        for (let k = 0; k < n && i < packed.length; k++) times.push(packed[i++]);
+        index.set(hash, times);
+      }
+      templateHopSec = FP_HOP_SEC;
+      return {
+        index,
+        hashCount: row.hashCount,
+        peakCount: row.peakCount,
+        duration: row.duration,
+        originSec: row.originSec || 0
+      };
+    }
+
+    function firstBurstOriginSec(env, thresh) {
+      const bursts = extractBursts(env, thresh);
+      if (!bursts.length) return 0;
+      return Math.max(0, bursts[0].start - 0.08);
+    }
+
+    function templateOriginSec() {
+      return (templateIndex && templateIndex.originSec) || 0;
+    }
+
+    function hydrateFingerprint(row) {
+      fileDuration = row.fileDuration || row.duration || 0;
+      fileEnvelope = row.envelope;
+      fileSpeechThreshold = row.thresh;
+      fileBursts = extractBursts(fileEnvelope, fileSpeechThreshold);
+      templateIndex = unpackTemplate(row);
+      const origin = templateOriginSec();
+      const fpStart = Math.max(0, Math.floor(origin * ENVELOPE_RATE));
+      const fpEnd = Math.min(fileEnvelope.length, fpStart + Math.ceil(state.settings.fingerprintSec * ENVELOPE_RATE));
+      startBursts = extractBursts(fileEnvelope, fileSpeechThreshold, fpStart, fpEnd);
+      updatePatternBlurHint();
+    }
+
+    async function fpLoad(file) {
+      try {
+        const row = await fpGet(fpStoreKey(file));
+        if (!row || row.ver !== FP_CACHE_VER) return null;
+        if (row.fingerprintSec !== state.settings.fingerprintSec) return null;
+        if (!row.envelope || !row.packed) return null;
+        return row;
+      } catch {
+        return null;
+      }
+    }
+
+    async function fpSave(file, analysed) {
+      const packed = packTemplate(analysed.template);
+      packed.envelope = analysed.envelope;
+      packed.thresh = analysed.thresh;
+      packed.fileDuration = analysed.duration;
+      packed.name = file.name;
+      await fpPut(fpStoreKey(file), packed);
+    }
+
+    async function markCachedFlags() {
+      await Promise.all(state.tracks.map(async t => {
+        t.fpCached = !!(await fpLoad(t.file));
+      }));
+    }
+
+    async function saveLibraryMeta() {
+      try {
+        await kvSet('libraryMeta', {
+          folderName,
+          selectedName: selectedTrack()?.name || '',
+          tracks: state.tracks.map(t => ({
+            name: t.name,
+            size: t.file ? t.file.size : 0,
+            lastModified: t.file ? t.file.lastModified : 0,
+            duration: t.duration || 0
+          }))
+        });
+        if (dirHandle) await kvSet('dirHandle', dirHandle);
+      } catch (err) {
+        console.warn('Could not save library', err);
+      }
+    }
+
+    function updateFolderUi() {
+      const btn = $('btnLoadFolder');
+      const hint = $('folderHint');
+      if (pendingDirHandle && !state.tracks.length) {
+        btn.textContent = 'Reopen ' + (pendingDirHandle.name || 'folder');
+        hint.textContent = 'Tap to reopen the saved folder. Fingerprints from last time are kept on this phone.';
+        return;
+      }
+      if (state.tracks.length) {
+        btn.textContent = 'Change folder';
+        const cached = state.tracks.filter(t => t.fpCached).length;
+        hint.textContent = (folderName ? folderName + ' · ' : '') +
+          state.tracks.length + ' tracks' +
+          (cached ? (' · ' + cached + ' fingerprinted') : '') +
+          '. Saved on this phone.';
+        return;
+      }
+      btn.textContent = 'Load audio folder';
+      hint.textContent = 'Load the folder of instruction audio. Pick the track, then arm backup. The folder location and fingerprints stay on this phone.';
+    }
+
+    async function applyAudioFiles(files, name, selectedName) {
+      const audioFiles = files.filter(isAudioFile);
+      if (!audioFiles.length) {
+        alert('No audio files found in that folder.');
+        return false;
+      }
+      await disarm(true);
+      revokeTracks();
+      folderName = name || audioFiles[0].webkitRelativePath?.split(/[\\/]/)[0] || 'Audio folder';
+      state.tracks = audioFiles
+        .sort((a, b) => a.name.localeCompare(b.name))
+        .map(file => ({
+          id: trackIdFor(file),
+          name: file.name.replace(/^.*[\\/]/, ''),
+          file,
+          url: URL.createObjectURL(file),
+          duration: 0,
+          fpCached: false
+        }));
+      const pick = selectedName && state.tracks.find(t => t.name === selectedName);
+      state.selectedId = (pick || state.tracks[0]).id;
+      pendingDirHandle = null;
+      renderTrackList();
+      await Promise.all(state.tracks.map(probeDuration));
+      await markCachedFlags();
+      renderTrackList();
+      await saveLibraryMeta();
+      prefetchFingerprints();
+      return true;
+    }
+
+    async function collectAudioFromDir(handle, prefix, out, depth) {
+      if (depth > 3) return;
+      for await (const [name, child] of handle.entries()) {
+        if (child.kind === 'directory') {
+          await collectAudioFromDir(child, prefix + name + '/', out, depth + 1);
+        } else if (isAudioFile({ name, type: '' })) {
+          out.push(await child.getFile());
+        }
+      }
+    }
+
+    async function ensureDirPerm(handle, interactive) {
+      if (!handle.queryPermission) return true;
+      const opts = { mode: 'read' };
+      let q = await handle.queryPermission(opts);
+      if (q === 'granted') return true;
+      if (!interactive) return false;
+      q = await handle.requestPermission(opts);
+      return q === 'granted';
+    }
+
+    async function loadFromDirHandle(handle, interactive, selectedName) {
+      if (!(await ensureDirPerm(handle, interactive))) return false;
+      const files = [];
+      await collectAudioFromDir(handle, '', files, 0);
+      dirHandle = handle;
+      folderName = handle.name || 'Audio folder';
+      return applyAudioFiles(files, folderName, selectedName);
+    }
+
+    async function chooseFolder() {
+      if (pendingDirHandle) {
+        const meta = await kvGet('libraryMeta').catch(() => null);
+        const ok = await loadFromDirHandle(pendingDirHandle, true, meta?.selectedName);
+        if (ok) return;
+        pendingDirHandle = null;
+      }
+      if (window.showDirectoryPicker) {
+        try {
+          const handle = await window.showDirectoryPicker({ mode: 'read' });
+          await loadFromDirHandle(handle, true);
+          return;
+        } catch (err) {
+          if (err && err.name === 'AbortError') return;
+        }
+      }
+      $('folderInput').click();
+    }
+
+    async function restoreLibrary() {
+      try {
+        const meta = await kvGet('libraryMeta');
+        const handle = await kvGet('dirHandle');
+        if (handle) {
+          const ok = await loadFromDirHandle(handle, false, meta?.selectedName);
+          if (ok) return;
+          pendingDirHandle = handle;
+          folderName = handle.name || meta?.folderName || '';
+          if (meta?.tracks?.length) {
+            $('emptyTracks').textContent = 'Saved folder: ' + (folderName || 'audio') +
+              ' (' + meta.tracks.length + ' tracks). Tap Reopen to use it.';
+          }
+          updateFolderUi();
+          return;
+        }
+        if (meta?.tracks?.length) {
+          $('emptyTracks').textContent = 'Last folder: ' + (meta.folderName || 'audio') +
+            ' (' + meta.tracks.length + ' tracks). Load it again — stored fingerprints will attach automatically.';
+        }
+      } catch (err) {
+        console.warn('Could not restore library', err);
+      }
+      updateFolderUi();
+    }
+
+    async function forgetLibrary() {
+      if (state.mode !== 'idle' && state.mode !== 'backing') await disarm(true);
+      revokeTracks();
+      state.tracks = [];
+      state.selectedId = null;
+      dirHandle = null;
+      pendingDirHandle = null;
+      folderName = '';
+      await kvDel('dirHandle').catch(() => {});
+      await kvDel('libraryMeta').catch(() => {});
+      $('emptyTracks').textContent = 'No folder loaded yet.';
+      renderTrackList();
+      updateFolderUi();
+    }
+
+    async function forgetFingerprints() {
+      await fpClear().catch(() => {});
+      state.tracks.forEach(t => { t.fpCached = false; });
+      renderTrackList();
+    }
+
+    async function analyseTrackFile(file) {
+      ensureAudioCtx();
+      const arrayBuf = await file.arrayBuffer();
+      const buffer = await audioCtx.decodeAudioData(arrayBuf.slice(0));
+      const envelope = computeEnvelope(buffer, ENVELOPE_RATE);
+      const peak = peakOf(envelope) || 0.001;
+      const thresh = Math.max(peak * 0.08, 0.008);
+      const origin = firstBurstOriginSec(envelope, thresh);
+      const template = buildTemplateIndex(buffer, state.settings.fingerprintSec, origin);
+      return { buffer, envelope, thresh, template, duration: buffer.duration };
+    }
+
+    function ensureIndexed(track, keepBuffer) {
+      const key = fpStoreKey(track.file);
+      if (fpInflight.has(key)) return fpInflight.get(key);
+      const job = (async () => {
+        const cached = await fpLoad(track.file);
+        if (cached) return { packed: cached, buffer: null };
+        const analysed = await analyseTrackFile(track.file);
+        await fpSave(track.file, analysed);
+        track.fpCached = true;
+        return { packed: packAnalysed(analysed), buffer: analysed.buffer };
+      })().finally(() => fpInflight.delete(key));
+      fpInflight.set(key, job);
+      return job;
+    }
+
+    function packAnalysed(analysed) {
+      const packed = packTemplate(analysed.template);
+      packed.envelope = analysed.envelope;
+      packed.thresh = analysed.thresh;
+      packed.fileDuration = analysed.duration;
+      return packed;
+    }
+
+    async function prefetchFingerprints() {
+      const gen = ++fpGen;
+      fpIndexBusy = true;
+      try {
+        for (const track of state.tracks.slice()) {
+          if (gen !== fpGen) return;
+          if (state.mode !== 'idle' && state.mode !== 'backing') break;
+          if (!state.tracks.includes(track) || track.fpCached) continue;
+          try {
+            await ensureIndexed(track, false);
+            updateFolderUi();
+            renderTrackList();
+          } catch (err) {
+            console.warn('Fingerprint skip', track.name, err);
+          }
+        }
+      } finally {
+        fpIndexBusy = false;
+        updateFolderUi();
+      }
+    }
+
+    function selectedTrack() {
+      return state.tracks.find(t => t.id === state.selectedId) || null;
+    }
+
+    function revokeTracks() {
+      state.tracks.forEach(t => {
+        if (t.url) URL.revokeObjectURL(t.url);
+      });
+    }
+
+    function setMode(mode) {
+      state.mode = mode;
+      updateUI();
+    }
+
+    function resetConfirmHold() {
+      confirmStartedAt = null;
+      confirmPositionSec = 0;
+      confirmHeldMs = 0;
+      confirmLastTick = 0;
+      confirmBadSince = null;
+      hitStreak = 0;
+      lastHitOffset = 0;
+      lastHitPerf = 0;
+    }
+
+    function isClipMatchMode() {
+      return state.mode === 'primed' || state.mode === 'manual' || state.mode === 'seeking';
+    }
+
+    function showsTrailRow() {
+      return state.mode === 'primed' || state.mode === 'manual' || state.mode === 'armed' ||
+        state.mode === 'cutout' || state.mode === 'seeking' || state.mode === 'backing';
+    }
+
+    function effectiveTrailMs() {
+      if (trackingLocked && manualMeasuredTrailMs) {
+        return normalizeTrailMs(manualMeasuredTrailMs + manualTrailAdjustMs);
+      }
+      if (trackingLocked && lockedBufferMs) return lockedBufferMs;
+      return normalizeTrailMs(state.settings.bufferDelayMs);
+    }
+
+    function manualClockSec() {
+      if (!manualStartedAt) return manualBaseSec || 0;
+      return Math.max(0, manualBaseSec + (Date.now() - manualStartedAt) / 1000);
+    }
+
+    function updateTrailUi() {
+      const row = $('trailRow');
+      const val = $('trailVal');
+      if (!row || !val) return;
+      const show = showsTrailRow();
+      row.hidden = !show;
+      if (!show) return;
+      const ms = effectiveTrailMs();
+      val.textContent = fmtTrailMs(ms);
+    }
+
+    function syncBufferDelayUi() {
+      const ms = normalizeTrailMs(state.settings.bufferDelayMs);
+      state.settings.bufferDelayMs = ms;
+      $('bufferDelay').value = String(ms);
+      $('bufferDelayVal').textContent = fmtTrailMs(ms);
+      updateTrailUi();
+    }
+
+    function applyTrailToPlayback() {
+      if (!backupAudio || !trackingLocked) return;
+      const room = roomPosition();
+      const target = Math.max(0, room - lockedBufferMs / 1000);
+      if (Math.abs(backupAudio.currentTime - target) > 0.12) {
+        backupAudio.currentTime = target;
+      }
+    }
+
+    function adjustTrail(deltaMs) {
+      const current = effectiveTrailMs();
+      const next = normalizeTrailMs(current + deltaMs);
+      if (next === current) return;
+      state.settings.bufferDelayMs = next;
+      if (trackingLocked && manualMeasuredTrailMs) {
+        manualTrailAdjustMs = next - manualMeasuredTrailMs;
+        lockedBufferMs = next;
+        manualTemplate = null;
+        manualWinStart = -1;
+        manualWinDur = 0;
+      } else if (trackingLocked) {
+        lockedBufferMs = next;
+      }
+      syncBufferDelayUi();
+      applyTrailToPlayback();
+      scheduleSaveSettings();
+    }
+
+    function bindTrailHold(btn, deltaMs, holdDeltaMs) {
+      let holdTimer = null;
+      let repeatTimer = null;
+      const stop = () => {
+        clearTimeout(holdTimer);
+        clearInterval(repeatTimer);
+        holdTimer = null;
+        repeatTimer = null;
+      };
+      const start = e => {
+        e.preventDefault();
+        adjustTrail(deltaMs);
+        stop();
+        holdTimer = setTimeout(() => {
+          repeatTimer = setInterval(() => adjustTrail(holdDeltaMs), 80);
+        }, 400);
+      };
+      btn.addEventListener('pointerdown', start);
+      btn.addEventListener('pointerup', stop);
+      btn.addEventListener('pointerleave', stop);
+      btn.addEventListener('pointercancel', stop);
+    }
+
+    function syncLineText() {
+      if (state.analysing) return 'Building a Shazam-style fingerprint of the first ' + state.settings.fingerprintSec + ' s…';
+      if (state.mode === 'primed') {
+        if (clipCollecting) return 'Recording ' + state.settings.clipSec + ' s clip to match the file…';
+        if (lastClipStatus === 'waiting') return 'Waiting for audio above the silence gate, then a ' + state.settings.clipSec + ' s clip';
+        const matchPct = Math.round(lastMatchScore * 100);
+        const clipBit = 'clip ' + matchPct + '% · ' + lastClipHits + ' hits · ×' +
+          lastClipContrast.toFixed(1) + ' · ' + Math.round(lastClipCoverage * 100) + '% cover' +
+          (lastClipGapBit ? ' · ' + lastClipGapBit : '');
+        if (confirmStartedAt) {
+          const needMs = state.settings.confirmHoldMs;
+          const holdBit = 'hold ' + (confirmHeldMs / 1000).toFixed(1) + ' / ' + (needMs / 1000).toFixed(1) + ' s';
+          if (confirmBadSince) return clipBit + ' · ' + holdBit + ' (last clip missed)';
+          return clipBit + ' · ' + holdBit + ' · file @ ' + fmtTime(lastClipOffset);
+        }
+        if (lastClipStatus === 'miss') return clipBit + ' · not the file (talking/noise ignored)';
+        return clipBit + ' · need another matching clip to lock';
+      }
+      if (state.mode === 'seeking') {
+        if (clipCollecting) return 'Recording a clip to re-lock near ' + fmtTime(seekWindow().center);
+        const win = seekWindow();
+        const clipBit = lastClipStatus === 'waiting'
+          ? 'Waiting for the amp to come back'
+          : ('clip ' + Math.round(lastMatchScore * 100) + '% · idf ' + lastClipHits +
+            ' · ' + Math.round(lastClipCoverage * 100) + '% cover @ ' + fmtTime(lastClipOffset));
+        const holdBit = confirmStartedAt
+          ? (' · hold ' + (confirmHeldMs / 1000).toFixed(1) + ' / ' +
+            (state.settings.confirmHoldMs / 1000).toFixed(1) + ' s')
+          : '';
+        return 'Backup paused · scanning ' + fmtTime(win.start) + '–' + fmtTime(win.start + win.dur) +
+          ' · ' + clipBit + holdBit;
+      }
+      if (state.mode === 'armed') {
+        let line = 'Locked · ' + fmtTrailMs(lockedBufferMs) + ' behind the amp';
+        if (clipCollecting && spotMode) return line + ' · spot-checking…';
+        const wait = spotWaitSec();
+        if (wait != null && trackingLocked) {
+          line += ' · next spot in ' + Math.ceil(wait) + 's';
+        }
+        if (lastSpotStatus) line += ' · ' + lastSpotStatus;
+        if (cutoutVerifyPending) return line + ' · re-checking sync after Keep listening…';
+        const coolLeft = cutoutCooldownUntil - Date.now();
+        if (coolLeft > 0) return line + ' · cutout paused ' + Math.ceil(coolLeft / 1000) + 's';
+        if (!fileExpectsSpeech) return line + ' · file pause (cutout ignored)';
+        if (unexpectedSilenceMs > 0) {
+          return line + ' · file expects speech · quiet ' +
+            (unexpectedSilenceMs / 1000).toFixed(1) + ' / ' +
+            (cutoutTriggerMs() / 1000).toFixed(1) + ' s';
+        }
+        return line;
+      }
+      if (state.mode === 'cutout') return 'Mic quiet where the file still has speech — Take over at the amp position';
+      if (state.mode === 'manual') {
+        if (!trackingLocked) {
+          if (clipCollecting) return 'Tracking · recording clip near the expected file time…';
+          if (confirmStartedAt) {
+            return 'Tracking · matching ' + (confirmHeldMs / 1000).toFixed(1) + ' / ' +
+              (state.settings.confirmHoldMs / 1000).toFixed(1) + ' s · trail preset ' +
+              fmtTrailMs(effectiveTrailMs());
+          }
+          if (lastClipStatus === 'miss') return 'Tracking · last clip missed · trail preset ' + fmtTrailMs(effectiveTrailMs());
+          return 'Tracking · listening for local match · trail preset ' + fmtTrailMs(effectiveTrailMs());
+        }
+        let line = 'Tracking · trail measured ' + fmtTrailMs(effectiveTrailMs());
+        if (lastSpotStatus) line += ' · ' + lastSpotStatus;
+        if (!fileExpectsSpeech) return line + ' · file pause';
+        if (unexpectedSilenceMs > 0) {
+          return line + ' · quiet ' + (unexpectedSilenceMs / 1000).toFixed(1) + ' / ' +
+            (cutoutTriggerMs() / 1000).toFixed(1) + ' s';
+        }
+        return line;
+      }
+      return '';
+    }
+
+    function showDualClock() {
+      return trackingLocked &&
+        (state.mode === 'armed' || state.mode === 'manual' || state.mode === 'cutout' || state.mode === 'backing');
+    }
+
+    function updateProgressDisplay() {
+      const dur = fileDuration || selectedTrack()?.duration || 0;
+      const durText = fmtTime(dur);
+      const dualEl = $('progressMetaDual');
+      const singleEl = $('progressMetaSingle');
+      const roomMark = $('progressRoomMark');
+
+      if (showDualClock()) {
+        const room = Math.max(0, roomPosition());
+        const backup = state.mode === 'backing' && backupAudio
+          ? backupAudio.currentTime
+          : backupPosition();
+        if (dualEl) dualEl.hidden = false;
+        if (singleEl) singleEl.hidden = true;
+        $('timeRoom').textContent = fmtTime(room);
+        $('timeBackup').textContent = fmtTime(backup);
+        const totalDual = $('timeTotalDual');
+        if (totalDual) totalDual.textContent = 'Track length ' + durText;
+        const backupPct = dur ? Math.min(100, (backup / dur) * 100) : 0;
+        const roomPct = dur ? Math.min(100, (room / dur) * 100) : 0;
+        $('progressFill').style.width = backupPct + '%';
+        if (roomMark) {
+          roomMark.hidden = false;
+          roomMark.style.left = roomPct + '%';
+        }
+        return;
+      }
+
+      if (dualEl) dualEl.hidden = true;
+      if (singleEl) singleEl.hidden = false;
+      if (roomMark) roomMark.hidden = true;
+
+      let pos = trackedPosition;
+      if (state.mode === 'backing' && backupAudio) pos = backupAudio.currentTime;
+      else if (state.mode === 'manual') pos = backupPosition();
+      else if (state.mode === 'seeking') pos = seekWindow().center;
+      else if (state.mode === 'primed' && confirmStartedAt) pos = lastClipOffset;
+      $('timeCurrent').textContent = fmtTime(pos);
+      $('progressFill').style.width = dur ? Math.min(100, (pos / dur) * 100) + '%' : '0%';
+    }
+
+    function updateUI() {
+      const track = selectedTrack();
+      const hasTracks = state.tracks.length > 0;
+      const hasSelection = !!track;
+
+      $('emptyTracks').hidden = hasTracks;
+      $('trackList').hidden = !hasTracks;
+      $('statusCard').hidden = !hasSelection;
+
+      if (track) {
+        $('selectedTrackLabel').textContent = 'Track: ' + track.name;
+        $('timeTotal').textContent = fmtTime(track.duration || fileDuration);
+      }
+
+      const pill = $('statusPill');
+      pill.className = 'status-pill';
+      const btn = $('btnMain');
+      const hint = $('mainBtnHint');
+      const showMic = state.mode === 'primed' || state.mode === 'manual' || state.mode === 'armed' ||
+        state.mode === 'cutout' || state.mode === 'seeking';
+      if (hint) hint.hidden = state.mode !== 'idle';
+
+      if (state.mode === 'idle') {
+        $('statusText').textContent = hasSelection ? 'Ready' : 'Select a track';
+        btn.textContent = 'Back me up';
+        btn.className = 'btn primary';
+        btn.disabled = !hasSelection;
+      } else if (state.mode === 'manual') {
+        pill.classList.add('listening');
+        if (state.analysing) {
+          $('statusText').textContent = 'Starting manual tracking…';
+        } else if (clipCollecting) {
+          $('statusText').textContent = 'Tracking · recording clip';
+        } else if (confirmStartedAt) {
+          const held = (confirmHeldMs / 1000).toFixed(1);
+          const need = (state.settings.confirmHoldMs / 1000).toFixed(1);
+          $('statusText').textContent = 'Tracking · matching ' + held + ' / ' + need + ' s';
+        } else if (trackingLocked) {
+          $('statusText').textContent = 'Tracking · trail measured';
+        } else if (lastClipStatus === 'miss') {
+          $('statusText').textContent = 'Tracking · clip missed';
+        } else {
+          $('statusText').textContent = 'Tracking · listening for match';
+        }
+        btn.textContent = 'Stop';
+        btn.className = 'btn';
+        btn.disabled = false;
+      } else if (state.mode === 'primed') {
+        pill.classList.add('waiting');
+        if (state.analysing) {
+          $('statusText').textContent = 'Analysing track';
+        } else if (clipCollecting) {
+          $('statusText').textContent = 'Recording ' + state.settings.clipSec + ' s clip';
+        } else if (confirmStartedAt) {
+          const held = (confirmHeldMs / 1000).toFixed(1);
+          const need = (state.settings.confirmHoldMs / 1000).toFixed(1);
+          $('statusText').textContent = confirmBadSince
+            ? ('Hold paused ' + held + ' / ' + need + ' s')
+            : ('Clip matched… ' + held + ' / ' + need + ' s');
+        } else if (lastClipStatus === 'miss') {
+          $('statusText').textContent = 'Clip missed';
+        } else {
+          $('statusText').textContent = 'Auto · waiting for a clip';
+        }
+        btn.textContent = 'Cancel';
+        btn.className = 'btn';
+        btn.disabled = false;
+      } else if (state.mode === 'armed') {
+        pill.classList.add('listening');
+        $('statusText').textContent = (clipCollecting && (spotMode || cutoutVerifyMode))
+          ? (cutoutVerifyMode ? 'Re-checking sync' : 'Spot-checking lock')
+          : fileExpectsSpeech
+          ? ('Listening · backup ' + fmtTrailMs(lockedBufferMs) + ' behind amp')
+          : ('Listening · expected pause · ' + fmtTrailMs(lockedBufferMs) + ' behind');
+        btn.textContent = 'Disarm';
+        btn.className = 'btn';
+        btn.disabled = false;
+      } else if (state.mode === 'cutout') {
+        pill.classList.add('cutout');
+        $('statusText').textContent = 'Cutout detected';
+        btn.textContent = 'Disarm';
+        btn.className = 'btn';
+        btn.disabled = false;
+      } else if (state.mode === 'backing') {
+        pill.classList.add('playing');
+        $('statusText').textContent = 'Playing backup';
+        btn.textContent = 'Stop';
+        btn.className = 'btn danger';
+        btn.disabled = false;
+      } else if (state.mode === 'seeking') {
+        pill.classList.add('waiting');
+        $('statusText').textContent = clipCollecting
+          ? 'Listening for the amp'
+          : (confirmStartedAt ? 'Amp heard — confirming' : 'Backup paused · watching for amp');
+        btn.textContent = 'Disarm';
+        btn.className = 'btn';
+        btn.disabled = false;
+      }
+
+      $('micMeterWrap').hidden = !showMic;
+      $('syncLine').hidden = !showMic;
+      if (showMic) $('syncLine').textContent = syncLineText();
+      if (showDebug || showViz) renderFingerprintViz();
+      renderTriggerLog();
+
+      $('btnLoadFolder').disabled = state.mode !== 'idle' && state.mode !== 'backing';
+      const locked = state.mode === 'primed' || state.mode === 'manual' || state.mode === 'armed' ||
+        state.mode === 'cutout' || state.mode === 'seeking';
+      document.querySelectorAll('.track-list li').forEach(li => {
+        li.style.pointerEvents = locked ? 'none' : '';
+        li.style.opacity = locked ? '0.65' : '';
+      });
+      $('cutoutOverlay').classList.toggle('show', state.mode === 'cutout');
+      updateTrailUi();
+      updateProgressDisplay();
+    }
+
+    function renderTrackList() {
+      const list = $('trackList');
+      list.innerHTML = '';
+      state.tracks.forEach(t => {
+        const li = document.createElement('li');
+        li.className = t.id === state.selectedId ? 'selected' : '';
+        const fpMark = t.fpCached ? '<span class="fp-tag">fp</span>' : '';
+        li.innerHTML = '<span class="name">' + escapeHtml(t.name) + '</span>' + fpMark +
+          '<span class="dur mono">' + (t.duration ? fmtTime(t.duration) : '…') + '</span>';
+        li.addEventListener('click', () => selectTrack(t.id));
+        list.appendChild(li);
+      });
+      updateFolderUi();
+      updateUI();
+    }
+
+    function escapeHtml(s) {
+      return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+
+    async function selectTrack(id) {
+      await disarm(true);
+      state.selectedId = id;
+      renderTrackList();
+      saveLibraryMeta();
+      updateUI();
+    }
+
+    async function probeDuration(track) {
+      return new Promise(resolve => {
+        const a = new Audio();
+        a.preload = 'metadata';
+        a.src = track.url;
+        a.addEventListener('loadedmetadata', () => {
+          track.duration = a.duration || 0;
+          resolve();
+        }, { once: true });
+        a.addEventListener('error', () => resolve(), { once: true });
+      });
+    }
+
+    async function handleFolderPick(ev) {
+      const files = Array.from(ev.target.files || []);
+      const ok = await applyAudioFiles(files, files[0]?.webkitRelativePath?.split(/[\\/]/)[0] || 'Audio folder');
+      if (ok) {
+        dirHandle = null;
+        await kvDel('dirHandle').catch(() => {});
+      }
+      ev.target.value = '';
+    }
+
+    function ensureAudioCtx() {
+      if (!audioCtx) {
+        const Ctx = window.AudioContext || window.webkitAudioContext;
+        if (!Ctx) throw new Error('Web Audio not supported');
+        audioCtx = new Ctx();
+      }
+      if (audioCtx.state === 'suspended') audioCtx.resume();
+      return audioCtx;
+    }
+
+    function computeEnvelope(buffer, rate) {
+      const ch = buffer.getChannelData(0);
+      const sr = buffer.sampleRate;
+      const win = Math.max(1, Math.floor(sr / rate));
+      const len = Math.ceil(ch.length / win);
+      const env = new Float32Array(len);
+      for (let i = 0; i < len; i++) {
+        let sum = 0;
+        const start = i * win;
+        const end = Math.min(start + win, ch.length);
+        for (let j = start; j < end; j++) sum += ch[j] * ch[j];
+        env[i] = Math.sqrt(sum / (end - start));
+      }
+      return env;
+    }
+
+    function rmsFromAnalyser() {
+      if (!analyser || !timeDomainBuf) return 0;
+      analyser.getFloatTimeDomainData(timeDomainBuf);
+      let sum = 0;
+      for (let i = 0; i < timeDomainBuf.length; i++) sum += timeDomainBuf[i] * timeDomainBuf[i];
+      return Math.sqrt(sum / timeDomainBuf.length);
+    }
+
+    function noteAmbient(rms) {
+      ambientRing.push(rms);
+      if (ambientRing.length > AMBIENT_SAMPLES) ambientRing.shift();
+      const sorted = ambientRing.slice().sort((a, b) => a - b);
+      ambientRms = sorted[Math.floor(sorted.length * 0.3)] || 0;
+    }
+
+    function suggestedSilenceGate() {
+      const raw = ambientRms * AMBIENT_MULT + 0.004;
+      const stepped = Math.round(raw / 0.005) * 0.005;
+      return Math.min(SILENCE_MAX, Math.max(SILENCE_MIN, stepped));
+    }
+
+    function setSilenceThreshold(val) {
+      const v = Math.min(SILENCE_MAX, Math.max(SILENCE_MIN, val));
+      state.settings.silenceThreshold = v;
+      const slider = $('silenceThreshold');
+      if (slider) slider.value = String(v);
+      $('silenceThresholdVal').textContent = v.toFixed(3);
+      updateCalibratorUi();
+    }
+
+    function updateCalibratorUi(liveRms) {
+      const live = liveRms == null ? ambientRms : liveRms;
+      const gate = state.settings.silenceThreshold;
+      const livePct = Math.min(100, (live / SILENCE_MAX) * 100);
+      const gatePct = Math.min(100, (gate / SILENCE_MAX) * 100);
+      const fill = $('calRoomFill');
+      const mark = $('calGateMark');
+      const micMark = $('micMeterMark');
+      if (fill) fill.style.width = livePct + '%';
+      if (mark) mark.style.left = gatePct + '%';
+      if (micMark) micMark.style.left = Math.min(100, (gate / MIC_METER_MAX) * 100) + '%';
+      const lab = $('calRoomVal');
+      if (lab) lab.textContent = live ? live.toFixed(3) : '—';
+      const hint = $('calHint');
+      if (hint) {
+        if (silenceManual) hint.textContent = 'Gate locked and saved on this phone. Drag the slider to change it.';
+        else if ((state.mode === 'primed' || state.mode === 'manual') && !confirmStartedAt) {
+          hint.textContent = 'Room ' + live.toFixed(3) + ' · floor ' + ambientRms.toFixed(3) + ' · gate ' + gate.toFixed(3) + ' (auto)';
+        } else {
+          hint.textContent = 'Green = mic level now. Orange mark = silence gate. Auto-sets while waiting; drag the slider to lock it.';
+        }
+      }
+    }
+
+    function maybeAutoCalibrateSilence() {
+      if (silenceManual) return;
+      if (state.mode !== 'primed' && state.mode !== 'manual') return;
+      if (state.analysing || confirmStartedAt) return;
+      if (ambientRing.length < 20) return;
+      const next = suggestedSilenceGate();
+      if (Math.abs(next - state.settings.silenceThreshold) >= 0.005) setSilenceThreshold(next);
+    }
+
+    function peakOf(arr) {
+      let max = 0;
+      for (let i = 0; i < arr.length; i++) if (arr[i] > max) max = arr[i];
+      return max;
+    }
+
+    function resample(arr, n) {
+      const out = new Float32Array(n);
+      if (!arr.length) return out;
+      if (arr.length === 1) {
+        out.fill(arr[0]);
+        return out;
+      }
+      for (let i = 0; i < n; i++) {
+        const t = i * (arr.length - 1) / (n - 1);
+        const j = Math.floor(t);
+        const f = t - j;
+        const a = arr[j];
+        const b = arr[Math.min(j + 1, arr.length - 1)];
+        out[i] = a + (b - a) * f;
+      }
+      return out;
+    }
+
+    function pearson(a, b) {
+      const n = Math.min(a.length, b.length);
+      if (n < 3) return 0;
+      let ma = 0, mb = 0;
+      for (let i = 0; i < n; i++) { ma += a[i]; mb += b[i]; }
+      ma /= n; mb /= n;
+      let num = 0, da = 0, db = 0;
+      for (let i = 0; i < n; i++) {
+        const x = a[i] - ma;
+        const y = b[i] - mb;
+        num += x * y;
+        da += x * x;
+        db += y * y;
+      }
+      if (da < 1e-12 || db < 1e-12) return 0;
+      return num / Math.sqrt(da * db);
+    }
+
+    function resampleTo(samples, fromRate, toRate) {
+      if (!samples || !samples.length) return new Float32Array(0);
+      if (Math.abs(fromRate - toRate) < 0.5) {
+        return samples instanceof Float32Array ? samples : new Float32Array(samples);
+      }
+      const n = Math.max(1, Math.round(samples.length * toRate / fromRate));
+      const out = new Float32Array(n);
+      const step = fromRate / toRate;
+      for (let i = 0; i < n; i++) {
+        const start = i * step;
+        const end = Math.min(samples.length, (i + 1) * step);
+        const j0 = Math.max(0, Math.floor(start));
+        const j1 = Math.min(samples.length, Math.max(j0 + 1, Math.ceil(end)));
+        let s = 0, c = 0;
+        for (let j = j0; j < j1; j++) { s += samples[j]; c++; }
+        out[i] = c ? s / c : 0;
+      }
+      return out;
+    }
+
+    function fftRadix2(re, im) {
+      const n = re.length;
+      for (let i = 1, j = 0; i < n; i++) {
+        let bit = n >> 1;
+        for (; j & bit; bit >>= 1) j ^= bit;
+        j ^= bit;
+        if (i < j) {
+          const tr = re[i]; re[i] = re[j]; re[j] = tr;
+          const ti = im[i]; im[i] = im[j]; im[j] = ti;
+        }
+      }
+      for (let len = 2; len <= n; len <<= 1) {
+        const ang = -2 * Math.PI / len;
+        const wlenRe = Math.cos(ang);
+        const wlenIm = Math.sin(ang);
+        for (let i = 0; i < n; i += len) {
+          let wr = 1, wi = 0;
+          const half = len >> 1;
+          for (let j = 0; j < half; j++) {
+            const ur = re[i + j], ui = im[i + j];
+            const vr = re[i + j + half] * wr - im[i + j + half] * wi;
+            const vi = re[i + j + half] * wi + im[i + j + half] * wr;
+            re[i + j] = ur + vr;
+            im[i + j] = ui + vi;
+            re[i + j + half] = ur - vr;
+            im[i + j + half] = ui - vi;
+            const nwr = wr * wlenRe - wi * wlenIm;
+            wi = wr * wlenIm + wi * wlenRe;
+            wr = nwr;
+          }
+        }
+      }
+    }
+
+    function constellationPeaks(samples, sampleRate) {
+      samples = resampleTo(samples, sampleRate, FP_SR);
+      const n = FP_FFT;
+      const hop = FP_HOP;
+      const win = new Float32Array(n);
+      for (let i = 0; i < n; i++) win[i] = 0.5 * (1 - Math.cos(2 * Math.PI * i / (n - 1)));
+      const binHz = FP_SR / n;
+      const minBin = Math.max(2, Math.floor(80 / binHz));
+      const maxBin = Math.min(n / 2 - 2, Math.floor(5000 / binHz));
+      const peaks = [];
+      const re = new Float32Array(n);
+      const im = new Float32Array(n);
+      let frame = 0;
+      for (let off = 0; off + n <= samples.length; off += hop, frame++) {
+        for (let i = 0; i < n; i++) {
+          re[i] = samples[off + i] * win[i];
+          im[i] = 0;
+        }
+        fftRadix2(re, im);
+        const mag = new Float32Array(maxBin + 2);
+        let avg = 0;
+        const count = maxBin - minBin + 1;
+        for (let b = minBin; b <= maxBin; b++) {
+          mag[b] = re[b] * re[b] + im[b] * im[b];
+          avg += mag[b];
+        }
+        avg /= count || 1;
+        const floor = avg * 1.4;
+        const local = [];
+        for (let b = minBin + 1; b < maxBin; b++) {
+          if (mag[b] > mag[b - 1] && mag[b] >= mag[b + 1] && mag[b] > floor) {
+            local.push({ f: Math.round(b / FP_BIN_Q) * FP_BIN_Q, m: mag[b], t: frame });
+          }
+        }
+        local.sort((a, b) => b.m - a.m);
+        for (let k = 0; k < Math.min(FP_PEAKS, local.length); k++) peaks.push(local[k]);
+      }
+      templateHopSec = FP_HOP_SEC;
+      return peaks;
+    }
+
+    function hashesFromPeaks(peaks) {
+      const out = [];
+      for (let i = 0; i < peaks.length; i++) {
+        const a = peaks[i];
+        for (let k = 1; k <= FP_FAN && i + k < peaks.length; k++) {
+          const b = peaks[i + k];
+          const dt = b.t - a.t;
+          if (dt < 1 || dt > FP_DT_MAX) continue;
+          const hash = (a.f * 100000 + b.f * 100 + dt) | 0;
+          out.push({ hash, t: a.t });
+        }
+      }
+      return out;
+    }
+
+    function buildTemplateIndex(buffer, sec, startSec) {
+      const sr = buffer.sampleRate;
+      const ch = buffer.getChannelData(0);
+      const origin = Math.max(0, startSec || 0);
+      const start = Math.min(ch.length, Math.floor(origin * sr));
+      const n = Math.min(Math.max(0, ch.length - start), Math.floor(Math.max(1, sec) * sr));
+      if (n < FP_FFT) return { index: new Map(), hashCount: 0, peakCount: 0, duration: 0, originSec: origin };
+      const slice = ch.subarray(start, start + n);
+      const peaks = constellationPeaks(slice, sr);
+      const hashes = hashesFromPeaks(peaks);
+      const index = new Map();
+      for (let i = 0; i < hashes.length; i++) {
+        const h = hashes[i];
+        let arr = index.get(h.hash);
+        if (!arr) { arr = []; index.set(h.hash, arr); }
+        arr.push(h.t);
+      }
+      return { index, hashCount: hashes.length, peakCount: peaks.length, duration: n / sr, originSec: origin };
+    }
+
+    function scoreNeedHits() {
+      return Math.max(20, Math.round(state.settings.clipSec * 10));
+    }
+
+    function minPeakHits() {
+      return Math.max(15, Math.round(state.settings.clipSec * 8));
+    }
+
+    function minFoundHashes() {
+      return Math.max(30, Math.round(state.settings.clipSec * 15));
+    }
+
+    function envelopeFromPcm(samples, sampleRate) {
+      const win = Math.max(1, Math.floor(sampleRate / ENVELOPE_RATE));
+      const len = Math.ceil(samples.length / win);
+      const env = new Float32Array(len);
+      for (let i = 0; i < len; i++) {
+        let sum = 0;
+        const start = i * win;
+        const end = Math.min(start + win, samples.length);
+        for (let j = start; j < end; j++) sum += samples[j] * samples[j];
+        env[i] = Math.sqrt(sum / Math.max(1, end - start));
+      }
+      return env;
+    }
+
+    function dilateBool(mask, radius) {
+      const n = mask.length;
+      const out = new Array(n).fill(false);
+      if (radius <= 0) {
+        for (let i = 0; i < n; i++) out[i] = !!mask[i];
+        return out;
+      }
+      for (let i = 0; i < n; i++) {
+        if (!mask[i]) continue;
+        const a = Math.max(0, i - radius);
+        const b = Math.min(n - 1, i + radius);
+        for (let j = a; j <= b; j++) out[j] = true;
+      }
+      return out;
+    }
+
+    function typicalFileGapSec() {
+      const bursts = startBursts.length ? startBursts : fileBursts;
+      if (!bursts || bursts.length < 2) return 0;
+      const gaps = [];
+      for (let i = 1; i < bursts.length; i++) {
+        const g = bursts[i].start - bursts[i - 1].end;
+        if (g >= 0.15 && g <= 4) gaps.push(g);
+      }
+      if (!gaps.length) return 0;
+      gaps.sort((a, b) => a - b);
+      return gaps[Math.floor(gaps.length / 2)];
+    }
+
+    function suggestedPatternBlurMs() {
+      const gap = typicalFileGapSec();
+      if (!gap) return 150;
+      return clampSetting(Math.round(gap * 250), 50, 250);
+    }
+
+    function updatePatternBlurHint() {
+      const el = $('patternBlurHint');
+      if (!el) return;
+      const gap = typicalFileGapSec();
+      const suggest = suggestedPatternBlurMs();
+      const base = 'Second layer: quiet gaps in the file must also be quiet on the mic. Blur forgives early/late burst edges. Raise if the real amp barely misses; lower if talking still hits.';
+      if (!gap) {
+        el.textContent = base + ' This file has no clear pauses — gap check stays off until pauses exist.';
+        return;
+      }
+      el.textContent = base + ' This file’s typical pause is ~' + Math.round(gap * 1000) +
+        ' ms (suggested blur ' + suggest + ' ms).';
+    }
+
+    function scoreSilencePattern(samples, sampleRate, offsetSec) {
+      const gap = typicalFileGapSec();
+      let blurMs = state.settings.patternBlurMs;
+      if (gap) blurMs = Math.min(blurMs, Math.max(0, Math.round(gap * 300)));
+      const empty = {
+        gapUsable: false, gapScore: 1, gapAgree: 0, gapBins: 0, gapQuiet: 0, gapBlurMs: blurMs
+      };
+      if (!fileEnvelope || !fileEnvelope.length || !samples || !samples.length) return empty;
+      const micEnv = envelopeFromPcm(samples, sampleRate);
+      const i0 = Math.max(0, Math.round(offsetSec * ENVELOPE_RATE));
+      const n = Math.min(micEnv.length, Math.max(0, fileEnvelope.length - i0));
+      if (n < 8) return empty;
+      const filePeak = peakOfRange(fileEnvelope, i0, i0 + n) || 0.001;
+      let micPeak = 0.001;
+      for (let i = 0; i < n; i++) if (micEnv[i] > micPeak) micPeak = micEnv[i];
+      const fileThresh = Math.max(fileSpeechThreshold || 0, filePeak * 0.22);
+      const micThresh = Math.max(state.settings.silenceThreshold, micPeak * 0.28);
+      const fileSpeech = new Array(n);
+      const micSpeech = new Array(n);
+      for (let i = 0; i < n; i++) {
+        fileSpeech[i] = fileEnvelope[i0 + i] > fileThresh;
+        micSpeech[i] = micEnv[i] > micThresh;
+      }
+      const blurBins = Math.round((blurMs / 1000) * ENVELOPE_RATE);
+      const fileSpeechWide = dilateBool(fileSpeech, blurBins);
+      let gapBins = 0, quiet = 0, agree = 0;
+      const micSpeechWide = dilateBool(micSpeech, blurBins);
+      for (let i = 0; i < n; i++) {
+        if (fileSpeechWide[i] === micSpeechWide[i]) agree++;
+        if (!fileSpeechWide[i]) {
+          gapBins++;
+          if (!micSpeech[i]) quiet++;
+        }
+      }
+      const gapUsable = gapBins >= 4;
+      return {
+        gapUsable,
+        gapScore: gapUsable ? quiet / gapBins : 1,
+        gapAgree: agree / n,
+        gapBins,
+        gapQuiet: quiet,
+        gapBlurMs: blurMs
+      };
+    }
+
+    function judgeClip(result) {
+      const needHits = minPeakHits();
+      const needScore = scoreNeedHits();
+      const needFound = minFoundHashes();
+      const score = result.score;
+      const coverage = result.coverage || 0;
+      const found = result.found || 0;
+      const reasons = [];
+      if (score < state.settings.matchThreshold) {
+        reasons.push('score ' + score.toFixed(2) + ' < ' + state.settings.matchThreshold.toFixed(2) +
+          ' (need ~' + (state.settings.matchThreshold * needScore).toFixed(0) + ' rare hashes)');
+      }
+      if (result.hits < needHits) {
+        reasons.push('idf ' + result.hits.toFixed(0) + ' < ' + needHits);
+      }
+      if ((result.contrast || 0) < MIN_CLIP_CONTRAST) {
+        reasons.push('contrast ×' + (result.contrast || 0).toFixed(1) + ' < ' + MIN_CLIP_CONTRAST);
+      }
+      if (found < needFound) {
+        reasons.push('only ' + found + ' clip hashes exist in the file (need ≥ ' + needFound + ')');
+      }
+      if (coverage < MIN_CLIP_COVERAGE) {
+        reasons.push('cover ' + Math.round(coverage * 100) + '% of matched hashes < ' +
+          Math.round(MIN_CLIP_COVERAGE * 100) + '%');
+      }
+      if (result.gapUsable && result.gapScore < MIN_GAP_SCORE) {
+        reasons.push('gaps ' + Math.round(result.gapScore * 100) + '% quiet in file pauses < ' +
+          Math.round(MIN_GAP_SCORE * 100) + '% (blur ' + Math.round(result.gapBlurMs || 0) + ' ms)');
+      }
+      if ((result.hashes || 0) < 8) reasons.push('too few peaks in clip');
+      return { ok: reasons.length === 0, reasons, needHits, needScore, coverage };
+    }
+
+    function applyVizUi() {
+      const btn = $('btnViz');
+      if (btn) {
+        btn.classList.toggle('on', showViz);
+        btn.setAttribute('aria-pressed', showViz ? 'true' : 'false');
+        btn.title = showViz ? 'Hide fingerprint' : 'Show fingerprint';
+      }
+      if (showDebug || showViz) renderFingerprintViz();
+    }
+
+    function applyDebugUi() {
+      const btn = $('btnDebug');
+      if (btn) {
+        btn.classList.toggle('on', showDebug);
+        btn.setAttribute('aria-pressed', showDebug ? 'true' : 'false');
+        btn.title = showDebug ? 'Hide debug overlay' : 'Show debug overlay';
+      }
+      const gates = $('triggerGates');
+      if (gates) gates.hidden = !showDebug;
+      const log = $('triggerLog');
+      if (log) log.hidden = !showDebug;
+      const actions = document.querySelector('.trigger-actions');
+      if (actions) actions.hidden = !showDebug;
+      if (showDebug || showViz) renderFingerprintViz();
+    }
+
+    function applySettingsLockUi() {
+      const panel = $('settingsPanel');
+      const btn = $('btnSettingsLock');
+      if (!panel || !btn) return;
+      panel.classList.toggle('locked', settingsLocked);
+      if (settingsLocked) panel.open = true;
+      btn.classList.toggle('on', settingsLocked);
+      btn.textContent = settingsLocked ? '🔒' : '🔓';
+      btn.title = settingsLocked ? 'Unpin settings' : 'Pin settings open';
+      btn.setAttribute('aria-pressed', settingsLocked ? 'true' : 'false');
+    }
+
+    function spotWaitSec() {
+      if (!nextSpotAt) return null;
+      return Math.max(0, (nextSpotAt - Date.now()) / 1000);
+    }
+
+    function clipQuality01() {
+      if (lastClipStatus === 'waiting' && !trackingLocked && !confirmStartedAt) return 0;
+      const need = Math.max(0.08, state.settings.matchThreshold || 0.4);
+      const scorePart = Math.max(0, Math.min(1, lastMatchScore / (need * 1.7)));
+      const coverPart = Math.max(0, Math.min(1, lastClipCoverage || 0));
+      const gapPart = lastClipGapBit && lastClipGapBit.indexOf('n/a') < 0
+        ? Math.max(0, Math.min(1, lastClipGapScore))
+        : 1;
+      const gapWeight = clampSetting(state.settings.gapConfidenceWeight, 0.05, 0.5);
+      const rest = Math.max(0.1, 1 - gapWeight);
+      const scoreWeight = rest * (0.55 / 0.85);
+      const coverWeight = rest * (0.30 / 0.85);
+      let q = scoreWeight * scorePart + coverWeight * coverPart + gapWeight * gapPart;
+      if (lastClipGapBit && lastClipGapBit.indexOf('n/a') < 0) {
+        const gapBoost = clampSetting(state.settings.gapConfidenceBoost, 0.5, 2.5);
+        const quietLift = Math.max(0, gapPart - 0.55) * 0.22 * gapBoost;
+        q = Math.min(1, q + quietLift);
+      }
+      if (lastClipStatus === 'miss') q = Math.min(q, 0.34);
+      if (lastClipStatus === 'hit' || trackingLocked) q = Math.max(q, Math.min(1, lastMatchScore));
+      return Math.max(0, Math.min(1, q));
+    }
+
+    function liveSpeechAgree() {
+      if (!fileEnvelope || !fileEnvelope.length || !micEnvT.length) return null;
+      if (!trackingLocked && !hasAlign) return null;
+      const windowSec = 3;
+      const nowPerf = performance.now() / 1000;
+      const fileThresh = Math.max(fileSpeechThreshold || 0, 0.0001);
+      const micThresh = state.settings.silenceThreshold;
+      let bins = 0, agree = 0, fileOnN = 0, bothOn = 0;
+      for (let i = micEnvT.length - 1; i >= 0; i--) {
+        const age = nowPerf - micEnvT[i];
+        if (age > windowSec) break;
+        if (age < 0) continue;
+        const ft = micFileTime(micEnvT[i]);
+        if (ft == null || ft < 0) continue;
+        const fi = Math.round(ft * ENVELOPE_RATE);
+        if (fi < 0 || fi >= fileEnvelope.length) continue;
+        const fileOn = fileEnvelope[fi] > fileThresh;
+        const micOn = micEnvV[i] > micThresh;
+        bins++;
+        if (fileOn === micOn) agree++;
+        if (fileOn) {
+          fileOnN++;
+          if (micOn) bothOn++;
+        }
+      }
+      if (bins < 16) return null;
+      const speechFrac = fileOnN / bins;
+      const agreeFrac = agree / bins;
+      const speechHit = fileOnN ? bothOn / fileOnN : 1;
+      if (speechFrac < 0.12) return { score: agreeFrac, pause: true };
+      return { score: 0.4 * agreeFrac + 0.6 * speechHit, pause: false };
+    }
+
+    function overallConfidence01() {
+      const clipQ = clipQuality01();
+      if (state.mode === 'idle' || state.analysing) return 0;
+      if (state.mode === 'cutout') return Math.min(0.28, clipQ * 0.4);
+      if (state.mode === 'backing') return Math.max(clipQ, trackingLocked ? 0.7 : clipQ);
+      if (state.mode === 'primed' && lastClipStatus === 'waiting' && !confirmStartedAt) return 0;
+      if (state.mode === 'manual' && !trackingLocked && lastClipStatus === 'waiting' && !confirmStartedAt) return 0.15;
+      if (state.mode === 'seeking' && lastClipStatus === 'waiting' && !confirmStartedAt) return 0;
+
+      const live = (state.mode === 'armed' || state.mode === 'manual' || state.mode === 'seeking')
+        ? liveSpeechAgree() : null;
+      let liveQ = live ? live.score : clipQ;
+      if (live && live.pause) liveQ = Math.max(liveQ, clipQ * 0.9);
+
+      let q;
+      if (trackingLocked && (state.mode === 'armed' || state.mode === 'manual')) {
+        q = 0.55 * clipQ + 0.45 * liveQ;
+        if (lastSpotStatus && lastSpotStatus.indexOf('weak') >= 0) q *= 0.82;
+        if (lastSpotStatus && (lastSpotStatus.indexOf('OK') >= 0 || lastSpotStatus.indexOf('confirmed') >= 0)) {
+          q = Math.min(1, q * 1.06);
+        }
+        if (state.mode === 'armed' && unexpectedSilenceMs < 400) q = Math.max(q, 0.58);
+        if (state.mode === 'armed' && unexpectedSilenceMs > 200) {
+          const sil = Math.min(1, unexpectedSilenceMs / Math.max(1, state.settings.silenceDurationMs));
+          q *= 1 - 0.55 * sil;
+        }
+      } else if (confirmStartedAt) {
+        const hold = Math.min(1, confirmHeldMs / Math.max(1, state.settings.confirmHoldMs));
+        const streak = Math.min(1, hitStreak / MIN_LOCK_CLIPS);
+        q = 0.72 * clipQ + 0.28 * (0.5 * hold + 0.5 * streak);
+      } else {
+        q = clipQ;
+      }
+      return Math.max(0, Math.min(1, q));
+    }
+
+    function updateClipConfidenceMeter() {
+      const fill = $('clipConfFill');
+      const pctEl = $('clipConfPct');
+      const meter = $('clipConfMeter');
+      if (!fill || !pctEl) return;
+      const live = state.mode === 'primed' || state.mode === 'manual' || state.mode === 'armed' ||
+        state.mode === 'cutout' || state.mode === 'seeking' || state.mode === 'backing';
+      if (!live) {
+        fill.style.width = '0%';
+        fill.className = 'conf-fill';
+        pctEl.textContent = '—';
+        if (meter) meter.removeAttribute('aria-valuenow');
+        return;
+      }
+      const q = overallConfidence01();
+      const pct = Math.round(q * 100);
+      fill.style.width = pct + '%';
+      const tone = pct >= 70 ? 'ok' : pct >= 40 ? 'warn' : (pct > 0 ? 'bad' : '');
+      fill.className = 'conf-fill' + (tone ? ' ' + tone : '');
+      pctEl.textContent = pct + '%';
+      if (meter) {
+        meter.setAttribute('aria-valuenow', String(pct));
+        meter.setAttribute('aria-valuetext', pct + ' percent');
+      }
+    }
+
+    function formatClipLine(result, judged, clockNote) {
+      const hits = Math.round(result.hits || 0);
+      const contrast = result.contrast || 0;
+      const coverage = judged && judged.coverage != null ? judged.coverage : (result.coverage || 0);
+      const coverPct = Math.round(coverage * 100);
+      const anyPct = Math.round((result.anyCover || 0) * 100);
+      const looked = result.looked || 0;
+      const found = result.found || 0;
+      const gapBit = result.gapUsable
+        ? ('gaps ' + Math.round(result.gapScore * 100) + '% (' + result.gapQuiet + '/' +
+          result.gapBins + ' quiet, blur ' + Math.round(result.gapBlurMs || 0) + ' ms)')
+        : 'gaps n/a';
+      const uniqBit = result.second ? (' · uniq ×' + result.uniq.toFixed(1)) : '';
+      const rawBit = result.rawHits ? (' · raw ' + Math.round(result.rawHits)) : '';
+      const postBit = result.avgPost ? (' · post ×' + result.avgPost.toFixed(1)) : '';
+      return 'score ' + result.score.toFixed(2) +
+        ' · idf ' + hits + rawBit + ' · ×' + contrast.toFixed(1) + uniqBit + postBit +
+        ' · cover ' + coverPct + '% of matched (' + looked + '/' + found +
+        ') · ' + anyPct + '% any · ' + gapBit + ' · @ ' +
+        fmtTime(result.offsetSec) + (clockNote || '');
+    }
+
+    function pushClipLog(entry) {
+      clipLog.push(entry);
+      if (clipLog.length > 36) clipLog.shift();
+    }
+
+    function lockGatesText() {
+      const needHits = minPeakHits();
+      const scoreHits = Math.ceil(state.settings.matchThreshold * scoreNeedHits());
+      return 'Hit needs score ≥ ' + state.settings.matchThreshold.toFixed(2) +
+        ' (~' + scoreHits + ' rare hashes) · ≥ ' + needHits + ' idf · ×' + MIN_CLIP_CONTRAST +
+        ' contrast · ' + Math.round(MIN_CLIP_COVERAGE * 100) + '% of hashes that exist in the file · ' +
+        'file pauses ≥ ' + Math.round(MIN_GAP_SCORE * 100) + '% quiet on mic (blur ' +
+        Math.round(state.settings.patternBlurMs) + ' ms) · ' +
+        MIN_LOCK_CLIPS + ' clips in a row that follow the file clock · ' +
+        (state.settings.confirmHoldMs / 1000).toFixed(1) + ' s hold';
+    }
+
+    function renderTriggerLog() {
+      const box = $('triggerBox');
+      if (!box) return;
+      const live = state.mode === 'primed' || state.mode === 'manual' || state.mode === 'armed' ||
+        state.mode === 'cutout' || state.mode === 'seeking' || state.mode === 'backing';
+      const show = live || (showDebug && clipLog.length > 0);
+      box.hidden = !show;
+      if (!show) return;
+      updateClipConfidenceMeter();
+      const gates = $('triggerGates');
+      if (gates) {
+        gates.textContent = lockGatesText();
+        gates.hidden = !showDebug;
+      }
+      const actions = document.querySelector('.trigger-actions');
+      if (actions) actions.hidden = !showDebug;
+      const log = $('triggerLog');
+      if (log) log.hidden = !showDebug;
+      if (showDebug && log) {
+        log.innerHTML = '';
+        if (!clipLog.length) {
+          const li = document.createElement('li');
+          li.textContent = 'No clips yet — waiting for audio above the silence gate.';
+          log.appendChild(li);
+        } else {
+          clipLog.forEach(e => {
+            const li = document.createElement('li');
+            li.className = e.kind;
+            li.textContent = e.line;
+            log.appendChild(li);
+          });
+          log.lastElementChild?.scrollIntoView({ block: 'nearest' });
+        }
+      }
+      const v = $('triggerVerdict');
+      if (!v) return;
+      if (!showDebug) {
+        if (state.mode === 'cutout') v.textContent = 'Lost — mic quiet where the file still has speech';
+        else if (state.mode === 'backing') v.textContent = 'Playing backup';
+        else if (state.mode === 'manual') {
+          v.textContent = trackingLocked ? 'Tracking with measured trail' : 'Tracking with user-started clock';
+        } else if (state.mode === 'armed') v.textContent = trackingLocked ? 'Locked on the amp' : 'Listening';
+        else if (state.mode === 'seeking') {
+          v.textContent = confirmStartedAt ? 'Amp heard — confirming lock' : 'Watching for the amp';
+        } else if (confirmStartedAt) {
+          v.textContent = 'Matching… ' + (confirmHeldMs / 1000).toFixed(1) + ' / ' +
+            (state.settings.confirmHoldMs / 1000).toFixed(1) + ' s';
+        } else if (lastClipStatus === 'miss') {
+          v.textContent = 'Last clip did not match — still listening';
+        } else {
+          v.textContent = 'Waiting for a clip that matches the file';
+        }
+        return;
+      }
+      if (state.mode === 'armed' || state.mode === 'cutout') {
+        const wait = spotWaitSec();
+        const spotBit = wait != null ? (' · next spot in ' + Math.ceil(wait) + 's') : '';
+        v.textContent = (lockReason || 'Locked') + spotBit;
+      } else if (state.mode === 'seeking') {
+        const win = seekWindow();
+        if (confirmStartedAt) {
+          v.textContent = 'Re-locking ' + (confirmHeldMs / 1000).toFixed(1) + ' / ' +
+            (state.settings.confirmHoldMs / 1000).toFixed(1) + ' s · ' +
+            hitStreak + '/' + MIN_LOCK_CLIPS + ' · window ' +
+            fmtTime(win.start) + '–' + fmtTime(win.start + win.dur);
+        } else if (lastClipFail) {
+          v.textContent = 'Seeking ' + fmtTime(win.start) + '–' + fmtTime(win.start + win.dur) +
+            ' · last miss: ' + lastClipFail;
+        } else {
+          v.textContent = 'Seeking the amp in ' + fmtTime(win.start) + '–' + fmtTime(win.start + win.dur);
+        }
+      } else if (confirmStartedAt) {
+        v.textContent = 'Hold ' + (confirmHeldMs / 1000).toFixed(1) + ' / ' +
+          (state.settings.confirmHoldMs / 1000).toFixed(1) + ' s · ' +
+          hitStreak + '/' + MIN_LOCK_CLIPS + ' hits in a row';
+      } else if (lastClipFail) {
+        v.textContent = 'Last clip missed: ' + lastClipFail;
+      } else {
+        v.textContent = 'Not locked — need ' + MIN_LOCK_CLIPS + ' strong clips in a row.';
+      }
+    }
+
+    function diagnosticText() {
+      const track = selectedTrack();
+      const lines = [
+        'Back Me Up diagnostics v' + APP_VER,
+        new Date().toISOString(),
+        'mode=' + state.mode + (trackingLocked ? ' locked' : ''),
+        'track=' + (track ? track.name : '(none)'),
+        'folder=' + (folderName || '(none)'),
+        'templateHashes=' + (templateIndex ? templateIndex.hashCount : 0) +
+          ' unique=' + (templateIndex ? templateIndex.index.size : 0) +
+          ' peaks=' + (templateIndex ? templateIndex.peakCount : 0) +
+          ' origin=' + fmtTime(templateOriginSec()),
+        lockGatesText(),
+        'settings ' + JSON.stringify({
+          bufferDelayMs: state.settings.bufferDelayMs,
+          silenceThreshold: state.settings.silenceThreshold,
+          silenceManual: !!silenceManual,
+          silenceDurationMs: state.settings.silenceDurationMs,
+          fingerprintSec: state.settings.fingerprintSec,
+          clipSec: state.settings.clipSec,
+          matchThreshold: state.settings.matchThreshold,
+          confirmHoldMs: state.settings.confirmHoldMs,
+          patternBlurMs: state.settings.patternBlurMs,
+          gapConfidenceWeight: state.settings.gapConfidenceWeight,
+          gapConfidenceBoost: state.settings.gapConfidenceBoost,
+          showDebug: !!showDebug,
+          showViz: !!showViz,
+          settingsLocked: !!settingsLocked
+        }),
+        'hold=' + (confirmHeldMs / 1000).toFixed(1) + 's streak=' + hitStreak +
+          ' lastFail=' + (lastClipFail || 'none'),
+        'lockReason=' + (lockReason || 'none'),
+        '--- clips ---'
+      ];
+      if (!clipLog.length) lines.push('(no clips)');
+      clipLog.forEach((e, i) => {
+        const when = e.at ? new Date(e.at).toISOString() : '';
+        lines.push((i + 1) + '. ' + (when ? when + ' ' : '') + e.line);
+      });
+      lines.push('--- paste this into the chat ---');
+      return lines.join('\n');
+    }
+
+    async function copyDiagnostics() {
+      const text = diagnosticText();
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          await navigator.clipboard.writeText(text);
+        } else {
+          const ta = document.createElement('textarea');
+          ta.value = text;
+          ta.setAttribute('readonly', '');
+          ta.style.position = 'fixed';
+          ta.style.left = '-9999px';
+          document.body.appendChild(ta);
+          ta.select();
+          document.execCommand('copy');
+          ta.remove();
+        }
+        const btn = $('btnCopyLog');
+        if (btn) {
+          const prev = btn.textContent;
+          btn.textContent = 'Copied';
+          setTimeout(() => { btn.textContent = prev; }, 1600);
+        }
+      } catch (err) {
+        alert('Could not copy. Use Share log instead.\n' + (err.message || err));
+      }
+    }
+
+    async function shareDiagnostics() {
+      const text = diagnosticText();
+      if (navigator.share) {
+        try {
+          await navigator.share({ title: 'Back Me Up log', text });
+          return;
+        } catch (err) {
+          if (err && err.name === 'AbortError') return;
+        }
+      }
+      await copyDiagnostics();
+    }
+
+    function matchClipToTemplate(samples, sampleRate, template) {
+      if (!template || !template.index.size) {
+        return {
+          score: 0, hits: 0, contrast: 0, offsetSec: 0, looked: 0, found: 0, hashes: 0,
+          coverage: 0, anyCover: 0, avgPost: 0, idfHits: 0, rawHits: 0
+        };
+      }
+      const peaks = constellationPeaks(samples, sampleRate);
+      const hashes = hashesFromPeaks(peaks);
+      if (hashes.length < 8) {
+        return {
+          score: 0, hits: 0, contrast: 0, offsetSec: 0, looked: 0, found: 0, hashes: hashes.length,
+          coverage: 0, anyCover: 0, avgPost: 0, idfHits: 0, rawHits: 0
+        };
+      }
+      const votes = new Map();
+      const idfVotes = new Map();
+      let looked = 0;
+      let postSum = 0;
+      for (let i = 0; i < hashes.length; i++) {
+        const found = template.index.get(hashes[i].hash);
+        if (!found) continue;
+        looked++;
+        postSum += found.length;
+        const w = 1 / found.length;
+        for (let j = 0; j < found.length; j++) {
+          const off = found[j] - hashes[i].t;
+          votes.set(off, (votes.get(off) || 0) + 1);
+          idfVotes.set(off, (idfVotes.get(off) || 0) + w);
+        }
+      }
+      const idfSmoothed = off => (idfVotes.get(off) || 0) + (idfVotes.get(off - 1) || 0) + (idfVotes.get(off + 1) || 0);
+      let bestOff = 0, best = 0;
+      idfVotes.forEach((_, off) => {
+        const s = idfSmoothed(off);
+        if (s > best) { best = s; bestOff = off; }
+      });
+      const idfHits = best;
+      const rawHits = (votes.get(bestOff) || 0) + (votes.get(bestOff - 1) || 0) + (votes.get(bestOff + 1) || 0);
+      let second = 0;
+      idfVotes.forEach((_, off) => {
+        if (Math.abs(off - bestOff) <= 3) return;
+        const s = idfSmoothed(off);
+        if (s > second) second = s;
+      });
+      const uniq = idfHits / Math.max(0.01, second);
+      const counts = [];
+      idfVotes.forEach(c => counts.push(c));
+      counts.sort((a, b) => a - b);
+      const median = counts.length ? counts[Math.floor(counts.length / 2)] : 0.01;
+      const contrast = idfHits / Math.max(0.01, median);
+      let localLooked = 0;
+      for (let i = 0; i < hashes.length; i++) {
+        const found = template.index.get(hashes[i].hash);
+        if (!found) continue;
+        const tClip = hashes[i].t;
+        for (let j = 0; j < found.length; j++) {
+          if (Math.abs((found[j] - tClip) - bestOff) <= 1) {
+            localLooked++;
+            break;
+          }
+        }
+      }
+      const coverage = localLooked / Math.max(1, looked);
+      const anyCover = looked / Math.max(1, hashes.length);
+      const avgPost = looked ? postSum / looked : 0;
+      const need = scoreNeedHits();
+      const score = Math.min(1, idfHits / need);
+      return {
+        score, hits: idfHits, rawHits, contrast, uniq, second,
+        offsetSec: Math.max(0, bestOff * FP_HOP_SEC),
+        looked: localLooked, found: looked, hashes: hashes.length, coverage, anyCover, avgPost, idfHits
+      };
+    }
+
+    function startClipCapture() {
+      if (!audioCtx || !micSource || captureNode) return;
+      const Ctx = audioCtx;
+      const makeProc = Ctx.createScriptProcessor || Ctx.webkitCreateScriptProcessor;
+      if (!makeProc) return;
+      const proc = makeProc.call(Ctx, 4096, 1, 1);
+      captureNode = proc;
+      captureGain = Ctx.createGain();
+      captureGain.gain.value = 0;
+      micSource.connect(captureNode);
+      captureNode.connect(captureGain);
+      captureGain.connect(Ctx.destination);
+      captureNode.onaudioprocess = ev => {
+        if (!clipCollecting || (state.mode !== 'primed' && state.mode !== 'manual' && state.mode !== 'armed' && state.mode !== 'seeking')) return;
+        const data = ev.inputBuffer.getChannelData(0);
+        clipParts.push(new Float32Array(data));
+        clipLength += data.length;
+        const need = Math.floor(state.settings.clipSec * Ctx.sampleRate);
+        if (clipLength >= need) finishClip();
+      };
+    }
+
+    function stopClipCapture() {
+      if (captureNode) {
+        try { captureNode.disconnect(); } catch { /* ignore */ }
+        captureNode.onaudioprocess = null;
+      }
+      if (captureGain) try { captureGain.disconnect(); } catch { /* ignore */ }
+      captureNode = null;
+      captureGain = null;
+      clipCollecting = false;
+      clipParts = [];
+      clipLength = 0;
+      clipBusy = false;
+    }
+
+    function beginClipCollect() {
+      clipCollecting = true;
+      clipParts = [];
+      clipLength = 0;
+      lastClipPerfStart = performance.now() / 1000;
+    }
+
+    function beginClipIfNeeded(rms) {
+      if (!isClipMatchMode() || state.analysing || clipCollecting || clipBusy) return;
+      if ((state.mode === 'primed' || state.mode === 'manual') && !templateIndex) return;
+      if (state.mode === 'seeking' && !fileBuffer) return;
+      if (rms <= state.settings.silenceThreshold) return;
+      beginClipCollect();
+      lastClipStatus = 'recording';
+      updateUI();
+    }
+
+    function maybeSpotCheck(rms) {
+      if ((state.mode !== 'armed' && state.mode !== 'manual') || !trackingLocked || !fileBuffer) return;
+      if (clipCollecting || clipBusy) return;
+      if (Date.now() < nextSpotAt) return;
+      if (!fileExpectsSpeech) return;
+      if (rms <= state.settings.silenceThreshold) return;
+      spotMode = true;
+      spotFileStart = roomPosition();
+      beginClipCollect();
+      updateUI();
+    }
+
+    function finishClip() {
+      if (clipBusy) return;
+      clipCollecting = false;
+      clipBusy = true;
+      const sr = audioCtx.sampleRate;
+      const need = Math.floor(state.settings.clipSec * sr);
+      const samples = new Float32Array(need);
+      let w = 0;
+      for (let i = 0; i < clipParts.length && w < need; i++) {
+        const part = clipParts[i];
+        const n = Math.min(part.length, need - w);
+        samples.set(part.subarray(0, n), w);
+        w += n;
+      }
+      clipParts = [];
+      clipLength = 0;
+      const wasSpot = spotMode;
+      const wasCutoutVerify = cutoutVerifyMode;
+      const spotStart = spotFileStart;
+      spotMode = false;
+      cutoutVerifyMode = false;
+      setTimeout(() => {
+        try {
+          if (wasCutoutVerify) applyCutoutVerifyMatch(samples, sr, spotStart, need / sr * 1000);
+          else if (wasSpot) applySpotMatch(samples, sr, spotStart, need / sr * 1000);
+          else if (state.mode === 'seeking') applySeekMatch(samples, sr, need / sr * 1000);
+          else if (state.mode === 'manual') applyManualMatch(samples, sr, need / sr * 1000);
+          else {
+            const result = matchClipToTemplate(samples, sr, templateIndex);
+            result.offsetSec = templateOriginSec() + result.offsetSec;
+            clipEnv = envelopeFromPcm(samples, sr);
+            clipEnvFileAt = result.offsetSec;
+            const pattern = scoreSilencePattern(samples, sr, result.offsetSec);
+            applyClipMatch(Object.assign(result, pattern), need / sr * 1000);
+          }
+        } finally {
+          clipBusy = false;
+        }
+      }, 0);
+    }
+
+    function applyClipMatch(result, clipMs) {
+      const judged = judgeClip(result);
+      const now = Date.now();
+      let clockNote = '';
+      if (judged.ok && hitStreak >= 1 && lastHitPerf) {
+        const dtWall = lastClipPerfStart - lastHitPerf;
+        const dtFile = result.offsetSec - lastHitOffset;
+        const drift = Math.abs(dtFile - dtWall);
+        clockNote = ' file+' + dtFile.toFixed(1) + 's wall+' + dtWall.toFixed(1) + 's drift ' + drift.toFixed(1) + 's';
+        if (dtWall > 0.4 && drift > MAX_CLOCK_DRIFT) {
+          judged.ok = false;
+          judged.reasons.push('clock ' + clockNote.trim() + ' > ' + MAX_CLOCK_DRIFT + 's');
+        }
+      }
+      lastMatchScore = result.score;
+      lastClipHits = Math.round(result.hits || 0);
+      lastClipOffset = result.offsetSec;
+      lastClipContrast = result.contrast || 0;
+      lastClipCoverage = judged.coverage;
+      lastClipHashes = result.hashes || 0;
+      lastClipLooked = result.looked || 0;
+      lastMatchGated = false;
+      lastClipGapScore = result.gapUsable ? result.gapScore : 0;
+      lastClipGapBit = result.gapUsable
+        ? ('gaps ' + Math.round(result.gapScore * 100) + '% (' + result.gapQuiet + '/' +
+          result.gapBins + ' quiet, blur ' + Math.round(result.gapBlurMs || 0) + ' ms)')
+        : 'gaps n/a';
+      const base = formatClipLine(result, judged, clockNote);
+      noteStrongLock(judged, result, clipMs);
+      if (judged.ok) {
+        lastClipStatus = 'hit';
+        lastClipFail = '';
+        confirmBadSince = null;
+        hitStreak += 1;
+        manualMissStreak = 0;
+        lastHitOffset = result.offsetSec;
+        lastHitPerf = lastClipPerfStart;
+        hasAlign = true;
+        alignPerfAt = lastClipPerfStart;
+        alignFileAt = result.offsetSec;
+        if (!confirmStartedAt) {
+          confirmStartedAt = now;
+          confirmHeldMs = 0;
+        }
+        confirmHeldMs += clipMs;
+        confirmPositionSec = result.offsetSec + clipMs / 1000;
+        pushClipLog({
+          kind: 'hit',
+          at: Date.now(),
+          line: (state.mode === 'seeking' ? 'SEEK HIT ' : state.mode === 'manual' ? 'MAN HIT ' : 'HIT  ') + base +
+            ' · streak ' + hitStreak + '/' + MIN_LOCK_CLIPS +
+            ' · hold ' + (confirmHeldMs / 1000).toFixed(1) + 's'
+        });
+        const enoughClips = hitStreak >= MIN_LOCK_CLIPS;
+        const enoughHold = confirmHeldMs >= state.settings.confirmHoldMs;
+        if (enoughClips && enoughHold) {
+          lockReason = 'Locked on ' + hitStreak + ' hits in a row · last ' + base;
+          pushClipLog({
+            kind: 'lock',
+            at: Date.now(),
+            line: (state.mode === 'seeking' ? 'SEEK LOCK ' : state.mode === 'manual' ? 'MAN LOCK ' : 'LOCK ') + lockReason
+          });
+          activateSync(confirmPositionSec, 0);
+          return;
+        }
+      } else {
+        lastClipStatus = 'miss';
+        lastClipFail = judged.reasons.join(' · ');
+        hitStreak = 0;
+        lastHitOffset = 0;
+        lastHitPerf = 0;
+        if (state.mode === 'manual' && !trackingLocked) manualMissStreak += 1;
+        pushClipLog({
+          kind: 'miss',
+          at: Date.now(),
+          line: (state.mode === 'seeking' ? 'SEEK MISS ' : state.mode === 'manual' ? 'MAN MISS ' : 'MISS ') +
+            base + ' · ' + lastClipFail
+        });
+        if (confirmStartedAt) {
+          if (!confirmBadSince) confirmBadSince = now;
+          if (now - confirmBadSince >= CONFIRM_GRACE_MS) resetConfirmHold();
+        }
+      }
+      updateUI();
+    }
+
+    function seekWindow() {
+      const elapsed = seekStopAt ? (Date.now() - seekStopAt) / 1000 : 0;
+      const nowEst = seekStopPos + elapsed;
+      const lo = Math.max(0, Math.min(seekStopPos, nowEst) - SEEK_RADIUS_SEC);
+      const hiRaw = Math.max(seekStopPos, nowEst) + SEEK_RADIUS_SEC;
+      const cap = fileDuration || hiRaw;
+      const hi = Math.min(cap, lo + SEEK_WINDOW_MAX, hiRaw);
+      return { start: lo, dur: Math.max(8, hi - lo), center: nowEst };
+    }
+
+    function refreshSeekTemplate() {
+      if (!fileBuffer) return null;
+      const win = seekWindow();
+      if (seekTemplate && Math.abs(win.start - seekWinStart) < 2 && Math.abs(win.dur - seekWinDur) < 4) {
+        return seekTemplate;
+      }
+      seekTemplate = buildTemplateIndex(fileBuffer, win.dur, win.start);
+      seekWinStart = win.start;
+      seekWinDur = win.dur;
+      return seekTemplate;
+    }
+
+    function manualMatchWindow() {
+      const center = roomPosition();
+      // Widen the search after repeated misses while the mic is clearly hearing something.
+      const widen = manualMissStreak >= MANUAL_WIDE_MISS_THRESH && ambientRms > 0;
+      const radius = widen ? SEEK_RADIUS_WIDE_SEC : SEEK_RADIUS_SEC;
+      const lo = Math.max(0, center - radius);
+      const hiRaw = center + radius;
+      const cap = fileDuration || hiRaw;
+      const hi = Math.min(cap, lo + SEEK_WINDOW_MAX * 2, hiRaw);
+      return { start: lo, dur: Math.max(8, hi - lo), center, wide: widen };
+    }
+
+    function refreshManualTemplate() {
+      if (!fileBuffer) return null;
+      const win = manualMatchWindow();
+      if (manualTemplate && Math.abs(win.start - manualWinStart) < 2 &&
+          Math.abs(win.dur - manualWinDur) < 4 && !!win.wide === !!manualWinWide) {
+        return manualTemplate;
+      }
+      manualTemplate = buildTemplateIndex(fileBuffer, win.dur, win.start);
+      manualWinStart = win.start;
+      manualWinDur = win.dur;
+      manualWinWide = win.wide;
+      return manualTemplate;
+    }
+
+    function applyManualMatch(samples, sampleRate, clipMs) {
+      const local = refreshManualTemplate();
+      if (!local || !local.hashCount) {
+        lastClipStatus = 'miss';
+        lastClipFail = 'no local fingerprint window';
+        pushClipLog({ kind: 'miss', at: Date.now(), line: 'MAN MISS no local fingerprint' });
+        updateUI();
+        return;
+      }
+      const result = matchClipToTemplate(samples, sampleRate, local);
+      result.offsetSec = (local.originSec || 0) + result.offsetSec;
+      clipEnv = envelopeFromPcm(samples, sampleRate);
+      clipEnvFileAt = result.offsetSec;
+      const pattern = scoreSilencePattern(samples, sampleRate, result.offsetSec);
+      Object.assign(result, pattern);
+      applyClipMatch(result, clipMs);
+    }
+
+    function applySeekMatch(samples, sampleRate, clipMs) {
+      const local = refreshSeekTemplate();
+      if (!local || !local.hashCount) {
+        lastClipStatus = 'miss';
+        lastClipFail = 'no file window to search';
+        pushClipLog({ kind: 'miss', at: Date.now(), line: 'SEEK MISS no local fingerprint' });
+        updateUI();
+        return;
+      }
+      const result = matchClipToTemplate(samples, sampleRate, local);
+      result.offsetSec = (local.originSec || 0) + result.offsetSec;
+      clipEnv = envelopeFromPcm(samples, sampleRate);
+      clipEnvFileAt = result.offsetSec;
+      const pattern = scoreSilencePattern(samples, sampleRate, result.offsetSec);
+      Object.assign(result, pattern);
+      applyClipMatch(result, clipMs);
+    }
+
+    function applySpotMatch(samples, sampleRate, fileStart, clipMs) {
+      nextSpotAt = Date.now() + SPOT_WAIT_MS;
+      if ((state.mode !== 'armed' && state.mode !== 'manual') || !fileBuffer) {
+        lastSpotStatus = 'spot skipped';
+        pushClipLog({ kind: 'spot', at: Date.now(), line: 'SPOT skipped (no file buffer)' });
+        updateUI();
+        return;
+      }
+      const preroll = Math.min(SPOT_PREROLL, Math.max(0, fileStart));
+      const local = buildTemplateIndex(fileBuffer, clipMs / 1000 + preroll + 0.5, Math.max(0, fileStart - preroll));
+      const result = matchClipToTemplate(samples, sampleRate, local);
+      const absOffset = (local.originSec || 0) + result.offsetSec;
+      result.offsetSec = absOffset;
+      clipEnv = envelopeFromPcm(samples, sampleRate);
+      clipEnvFileAt = absOffset;
+      const pattern = scoreSilencePattern(samples, sampleRate, absOffset);
+      Object.assign(result, pattern);
+      const judged = judgeClip(result);
+      const drift = Math.abs(absOffset - fileStart);
+      const close = drift < 1.5;
+      const good = judged.ok && close;
+      noteStrongLock({ ok: good, coverage: judged.coverage }, result, clipMs);
+      lastMatchScore = result.score;
+      lastClipHits = Math.round(result.hits || 0);
+      lastClipContrast = result.contrast || 0;
+      lastClipOffset = absOffset;
+      lastClipCoverage = judged.coverage;
+      lastClipLooked = result.looked || 0;
+      lastClipGapScore = result.gapUsable ? result.gapScore : 0;
+      lastClipGapBit = result.gapUsable
+        ? ('gaps ' + Math.round(result.gapScore * 100) + '% (' + result.gapQuiet + '/' +
+          result.gapBins + ' quiet, blur ' + Math.round(result.gapBlurMs || 0) + ' ms)')
+        : 'gaps n/a';
+      spotChecksDone++;
+      const clockNote = ' room@' + fmtTime(fileStart) + ' drift ' + drift.toFixed(1) + 's';
+      const base = formatClipLine(result, judged, clockNote);
+      const failBit = good ? '' : (' · ' + (close ? judged.reasons.join(' · ') : ('offset drift ' + drift.toFixed(1) + 's')));
+      pushClipLog({
+        kind: 'spot',
+        at: Date.now(),
+        line: (good ? 'SPOT OK  ' : 'SPOT WEAK ') + base + failBit
+      });
+      lastSpotStatus = good
+        ? ('spot #' + spotChecksDone + ' OK')
+        : ('spot #' + spotChecksDone + ' weak · still locked');
+      updateUI();
+    }
+
+    function pauseBackupAndSeek() {
+      seekStopPos = backupAudio ? backupAudio.currentTime : trackedPosition;
+      seekStopAt = Date.now();
+      seekTemplate = null;
+      seekWinStart = -1;
+      seekWinDur = 0;
+      manualTemplate = null;
+      manualWinStart = -1;
+      manualWinDur = 0;
+      trackingLocked = false;
+      resetConfirmHold();
+      resetCutoutState();
+      lastClipStatus = 'waiting';
+      lastClipFail = '';
+      lastSpotStatus = 'watching for the amp near ' + fmtTime(seekStopPos);
+      if (backupAudio) {
+        backupAudio.pause();
+        backupAudio.volume = 0;
+      }
+      if (pendingPlayTimer) {
+        clearTimeout(pendingPlayTimer);
+        pendingPlayTimer = null;
+      }
+      const track = selectedTrack();
+      if (!fileBuffer && track && track.file && audioCtx) {
+        track.file.arrayBuffer()
+          .then(ab => audioCtx.decodeAudioData(ab.slice(0)))
+          .then(buf => { if (state.mode === 'seeking') fileBuffer = buf; })
+          .catch(err => console.warn('Seek decode failed', err));
+      }
+      pushClipLog({
+        kind: 'spot',
+        at: Date.now(),
+        line: 'SEEK start · window ±' + SEEK_RADIUS_SEC + 's around ' + fmtTime(seekStopPos)
+      });
+      setMode('seeking');
+      if (!listenTimer) listenTimer = setInterval(tickListen, LISTEN_MS);
+      startClipCapture();
+      requestWakeLock();
+      updateUI();
+    }
+
+    function applyCutoutVerifyMatch(samples, sampleRate, fileStart, clipMs) {
+      cutoutVerifyPending = false;
+      nextSpotAt = Date.now() + SPOT_WAIT_MS;
+      if (state.mode !== 'armed' || !fileBuffer) {
+        lastSpotStatus = 'sync check skipped';
+        cutoutCooldownUntil = Date.now() + CUTOUT_COOLDOWN_MS;
+        updateUI();
+        return;
+      }
+      const preroll = Math.min(SPOT_PREROLL, Math.max(0, fileStart));
+      const local = buildTemplateIndex(fileBuffer, clipMs / 1000 + preroll + 0.5, Math.max(0, fileStart - preroll));
+      const result = matchClipToTemplate(samples, sampleRate, local);
+      const absOffset = (local.originSec || 0) + result.offsetSec;
+      result.offsetSec = absOffset;
+      clipEnv = envelopeFromPcm(samples, sampleRate);
+      clipEnvFileAt = absOffset;
+      const pattern = scoreSilencePattern(samples, sampleRate, absOffset);
+      Object.assign(result, pattern);
+      const judged = judgeClip(result);
+      const drift = Math.abs(absOffset - fileStart);
+      const close = drift < 1.5;
+      const good = judged.ok && close;
+      noteStrongLock({ ok: good, coverage: judged.coverage }, result, clipMs);
+      lastMatchScore = result.score;
+      lastClipHits = Math.round(result.hits || 0);
+      lastClipContrast = result.contrast || 0;
+      lastClipOffset = absOffset;
+      lastClipCoverage = judged.coverage;
+      const clockNote = ' room@' + fmtTime(fileStart) + ' drift ' + drift.toFixed(1) + 's';
+      const base = formatClipLine(result, judged, clockNote);
+      if (good) {
+        unexpectedSilenceMs = 0;
+        micSpeechStartedAt = null;
+        cutoutCooldownUntil = Date.now() + CUTOUT_COOLDOWN_MS;
+        hasAlign = true;
+        alignPerfAt = performance.now() / 1000;
+        alignFileAt = absOffset;
+        lastSpotStatus = 'sync confirmed after Keep listening';
+        pushClipLog({
+          kind: 'spot',
+          at: Date.now(),
+          line: 'VERIFY OK  ' + base
+        });
+      } else {
+        cutoutCooldownUntil = Date.now() + CUTOUT_FAIL_COOLDOWN_MS;
+        unexpectedSilenceMs = 0;
+        lastSpotStatus = 'sync weak — cutout paused ' + Math.round(CUTOUT_FAIL_COOLDOWN_MS / 1000) + 's';
+        pushClipLog({
+          kind: 'spot',
+          at: Date.now(),
+          line: 'VERIFY WEAK ' + base + ' · ' + (close ? judged.reasons.join(' · ') : ('offset drift ' + drift.toFixed(1) + 's'))
+        });
+      }
+      updateUI();
+    }
+
+    function extractBursts(env, threshold, startIdx, endIdx) {
+      const bursts = [];
+      const enter = threshold;
+      const leave = threshold * 0.65;
+      let i = startIdx || 0;
+      const last = endIdx == null ? env.length : endIdx;
+      while (i < last) {
+        if (env[i] <= enter) { i++; continue; }
+        const start = i;
+        const samples = [];
+        let sum = 0, peak = 0;
+        let speaking = true;
+        while (i < last && speaking) {
+          const v = env[i];
+          samples.push(v);
+          sum += v;
+          if (v > peak) peak = v;
+          i++;
+          if (i < last && env[i] <= leave) speaking = false;
+        }
+        const dur = samples.length / ENVELOPE_RATE;
+        if (dur >= MIN_BURST_SEC) {
+          bursts.push({
+            start: start / ENVELOPE_RATE,
+            end: (start + samples.length) / ENVELOPE_RATE,
+            dur,
+            mean: sum / samples.length,
+            peak,
+            samples
+          });
+        }
+      }
+      return mergeCloseBursts(bursts);
+    }
+
+    function mergeCloseBursts(bursts, maxGapSec) {
+      const gap = maxGapSec == null ? 0.18 : maxGapSec;
+      if (bursts.length < 2) return bursts;
+      const out = [bursts[0]];
+      for (let i = 1; i < bursts.length; i++) {
+        const prev = out[out.length - 1];
+        const cur = bursts[i];
+        if (cur.start - prev.end <= gap) {
+          prev.samples = prev.samples.concat(cur.samples);
+          prev.end = cur.end;
+          prev.dur = prev.end - prev.start;
+          let sum = 0, peak = prev.peak;
+          for (let j = 0; j < prev.samples.length; j++) {
+            sum += prev.samples[j];
+            if (prev.samples[j] > peak) peak = prev.samples[j];
+          }
+          prev.mean = sum / prev.samples.length;
+          prev.peak = peak;
+        } else {
+          out.push(cur);
+        }
+      }
+      return out;
+    }
+
+    function finishBurst(burst) {
+      if (!burst) return null;
+      burst.dur = burst.samples.length / ENVELOPE_RATE;
+      burst.end = burst.start + burst.dur;
+      burst.mean = burst.samples.length ? burst.sum / burst.samples.length : 0;
+      if (burst.dur < MIN_BURST_SEC) return null;
+      return burst;
+    }
+
+    function currentMicBursts() {
+      const list = completedMicBursts.slice();
+      if (liveBurst && liveBurst.samples.length / ENVELOPE_RATE >= MIN_BURST_SEC) {
+        const live = finishBurst({
+          start: liveBurst.start,
+          samples: liveBurst.samples.slice(),
+          sum: liveBurst.sum,
+          peak: liveBurst.peak
+        });
+        if (live) list.push(live);
+      }
+      return mergeCloseBursts(list).slice(-MAX_MATCH_BURSTS);
+    }
+
+    function pairBurstScore(micB, fileB) {
+      const durScore = 1 - Math.min(1, Math.abs(micB.dur - fileB.dur) / Math.max(micB.dur, fileB.dur, 0.12));
+      let shapeScore = 0;
+      if (micB.samples.length >= 4 && fileB.samples.length >= 4) {
+        shapeScore = pearson(resample(micB.samples, SHAPE_POINTS), resample(fileB.samples, SHAPE_POINTS));
+        shapeScore = Math.max(0, shapeScore);
+      }
+      return 0.55 * durScore + 0.45 * shapeScore;
+    }
+
+    function alignBursts(micBursts, fileBursts) {
+      const n = micBursts.length;
+      const m = fileBursts.length;
+      const empty = { score: 0, matches: 0, position: 0, pairs: [], skippedMic: [], skippedFile: [] };
+      if (!n || !m) return empty;
+
+      const dp = Array.from({ length: n + 1 }, () =>
+        Array.from({ length: m + 1 }, () => ({ val: 0, matches: 0, via: null }))
+      );
+
+      for (let i = 0; i <= n; i++) {
+        for (let j = 0; j <= m; j++) {
+          if (i === 0 && j === 0) continue;
+          let best = { val: -1e9, matches: 0, via: null };
+          if (i > 0) {
+            const p = dp[i - 1][j];
+            const cand = { val: p.val, matches: p.matches, via: 'mic' };
+            if (cand.val > best.val) best = cand;
+          }
+          if (j > 0) {
+            const p = dp[i][j - 1];
+            const cand = { val: p.val, matches: p.matches, via: 'file' };
+            if (cand.val > best.val) best = cand;
+          }
+          if (i > 0 && j > 0) {
+            const pair = pairBurstScore(micBursts[i - 1], fileBursts[j - 1]);
+            if (pair >= ALIGN_MATCH_FLOOR) {
+              const p = dp[i - 1][j - 1];
+              const cand = { val: p.val + pair, matches: p.matches + 1, via: 'match' };
+              if (cand.val > best.val || (Math.abs(cand.val - best.val) < 1e-9 && cand.matches > best.matches)) {
+                best = cand;
+              }
+            }
+          }
+          dp[i][j] = best.via ? best : { val: 0, matches: 0, via: null };
+        }
+      }
+
+      const pairs = [];
+      const skippedMic = [];
+      const skippedFile = [];
+      let i = n;
+      let j = m;
+      while (i > 0 || j > 0) {
+        const cell = dp[i][j];
+        if (!cell.via) break;
+        if (cell.via === 'match') {
+          pairs.push({ micIdx: i - 1, fileIdx: j - 1 });
+          i--;
+          j--;
+        } else if (cell.via === 'mic') {
+          skippedMic.push(i - 1);
+          i--;
+        } else {
+          skippedFile.push(j - 1);
+          j--;
+        }
+      }
+      pairs.reverse();
+      skippedMic.reverse();
+      skippedFile.reverse();
+
+      const cell = dp[n][m];
+      let score = 0;
+      if (cell.matches > 0) {
+        score = cell.val / cell.matches;
+        if (cell.matches < MIN_LOCK_BURSTS) score *= cell.matches / MIN_LOCK_BURSTS;
+      }
+      let position = 0;
+      if (pairs.length) {
+        const last = pairs[pairs.length - 1];
+        const f = fileBursts[last.fileIdx];
+        const mb = micBursts[last.micIdx];
+        position = f.start + Math.min(mb.dur, f.dur);
+      }
+      return { score, matches: cell.matches, position, pairs, skippedMic, skippedFile };
+    }
+
+    function fpWindowSec() {
+      return Math.max(1, state.settings.fingerprintSec);
+    }
+
+    function fpScrollsWithTrack() {
+      return trackingLocked &&
+        (state.mode === 'armed' || state.mode === 'manual' || state.mode === 'cutout' || state.mode === 'backing');
+    }
+
+    function micFileTime(perfT) {
+      if (trackingLocked && alignPerfAt) {
+        return lockPositionSec + (perfT - alignPerfAt);
+      }
+      return vizFileTime(perfT);
+    }
+
+    function fpViewWindow() {
+      const windowSec = fpWindowSec();
+      const origin = templateOriginSec();
+      const dur = fileDuration || (fileEnvelope ? fileEnvelope.length / ENVELOPE_RATE : windowSec);
+
+      if (fpScrollsWithTrack()) {
+        const room = Math.max(0, roomPosition());
+        let start = room - windowSec * FP_SCROLL_LEAD;
+        if (start + windowSec > dur) start = Math.max(0, dur - windowSec);
+        start = Math.max(0, start);
+        return {
+          start,
+          windowSec,
+          scrolling: true,
+          playhead: room - start,
+          playheadBackup: backupPosition() - start,
+          origin
+        };
+      }
+
+      if (state.mode === 'seeking') {
+        const win = seekWindow();
+        const span = Math.max(windowSec, win.dur);
+        let start = win.center - span * 0.5;
+        if (start + span > dur) start = Math.max(0, dur - span);
+        start = Math.max(0, start);
+        const nowPerf = performance.now() / 1000;
+        const playhead = hasAlign && micFileTime(nowPerf) != null
+          ? micFileTime(nowPerf) - start
+          : win.center - start;
+        return {
+          start,
+          windowSec: span,
+          scrolling: true,
+          playhead,
+          playheadBackup: null,
+          origin
+        };
+      }
+
+      return {
+        start: origin,
+        windowSec,
+        scrolling: false,
+        playhead: null,
+        playheadBackup: null,
+        origin
+      };
+    }
+
+    function envelopeWindowSeries(env, viewStart, windowSec) {
+      const i0 = Math.max(0, Math.floor(viewStart * ENVELOPE_RATE));
+      const n = Math.min(
+        Math.max(0, env.length - i0),
+        Math.ceil(windowSec * ENVELOPE_RATE)
+      );
+      const xs = [];
+      const ys = [];
+      for (let i = 0; i < n; i++) {
+        xs.push(i / ENVELOPE_RATE);
+        ys.push(env[i0 + i]);
+      }
+      return { xs, ys, peak: peakOfRange(env, i0, i0 + n) };
+    }
+
+    function micLiveSeries(viewStart, windowSec) {
+      const xs = [];
+      const ys = [];
+      let peak = 0.0001;
+      for (let i = 0; i < micEnvT.length; i++) {
+        const ft = micFileTime(micEnvT[i]);
+        if (ft == null) continue;
+        const rel = ft - viewStart;
+        if (rel < -0.08 || rel > windowSec + 0.08) continue;
+        xs.push(rel);
+        ys.push(micEnvV[i]);
+        if (micEnvV[i] > peak) peak = micEnvV[i];
+      }
+      return { xs, ys, peak };
+    }
+
+    function clipOverlaySeries(viewStart) {
+      if (!clipEnv || !clipEnv.length) return { xs: [], ys: [], peak: 0.0001 };
+      const xs = [];
+      const ys = [];
+      let peak = 0.0001;
+      for (let i = 0; i < clipEnv.length; i++) {
+        xs.push(clipEnvFileAt + i / ENVELOPE_RATE - viewStart);
+        ys.push(clipEnv[i]);
+        if (clipEnv[i] > peak) peak = clipEnv[i];
+      }
+      return { xs, ys, peak };
+    }
+
+    function noteMicEnvelope(rms) {
+      micEnvT.push(performance.now() / 1000);
+      micEnvV.push(rms);
+      if (micEnvT.length > 1800) {
+        micEnvT.splice(0, 400);
+        micEnvV.splice(0, 400);
+      }
+    }
+
+    function vizFileTime(perfT) {
+      if (hasAlign) return alignFileAt + (perfT - alignPerfAt);
+      const micBursts = currentMicBursts();
+      if (micBursts.length && startBursts.length) {
+        return startBursts[0].start + (perfT - micBursts[0].start);
+      }
+      return null;
+    }
+
+    function peakOfRange(arr, i0, i1) {
+      let p = 0.0001;
+      const last = Math.min(arr.length, i1);
+      for (let i = Math.max(0, i0); i < last; i++) if (arr[i] > p) p = arr[i];
+      return p;
+    }
+
+    function sizeFpCanvas(canvas) {
+      const parent = canvas.parentElement;
+      const w = Math.max(1, parent.clientWidth);
+      const h = Math.max(1, parent.clientHeight);
+      const dpr = Math.min(2, window.devicePixelRatio || 1);
+      const pw = Math.floor(w * dpr);
+      const ph = Math.floor(h * dpr);
+      if (canvas.width !== pw) canvas.width = pw;
+      if (canvas.height !== ph) canvas.height = ph;
+      return { w: pw, h: ph, dpr };
+    }
+
+    function paintEnvelope(canvas, color, markerSec, windowSec) {
+      const { w, h } = sizeFpCanvas(canvas);
+      const ctx = canvas.getContext('2d');
+      ctx.clearRect(0, 0, w, h);
+      ctx.fillStyle = color;
+      return { ctx, w, h, markerSec, windowSec };
+    }
+
+    function drawEnvelopeSeries(ctx, w, h, xs, ys, peak, windowSec) {
+      if (!xs.length || !windowSec) return;
+      const pad = 4 * (window.devicePixelRatio || 1);
+      const usable = h - pad * 2;
+      ctx.beginPath();
+      ctx.moveTo(0, h - pad);
+      let started = false;
+      for (let i = 0; i < xs.length; i++) {
+        const x = xs[i] / windowSec * w;
+        if (x < -2 || x > w + 2) continue;
+        const y = h - pad - Math.max(0, ys[i] / peak) * usable;
+        if (!started) { ctx.lineTo(x, h - pad); ctx.lineTo(x, y); started = true; }
+        else ctx.lineTo(x, y);
+      }
+      if (!started) return;
+      ctx.lineTo(w, h - pad);
+      ctx.closePath();
+      ctx.globalAlpha = 0.88;
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+
+    function drawViewportMarker(ctx, w, h, sec, windowSec, color) {
+      if (sec == null || sec < 0 || sec > windowSec) return;
+      const x = sec / windowSec * w;
+      ctx.strokeStyle = color || '#b54708';
+      ctx.lineWidth = Math.max(1, w / 400);
+      ctx.beginPath();
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, h);
+      ctx.stroke();
+    }
+
+    function renderFingerprintViz() {
+      const viz = $('fpViz');
+      if (!viz) return;
+      const show = (showViz || showDebug) &&
+        (state.mode === 'primed' || state.mode === 'manual' || state.mode === 'armed' || state.mode === 'cutout' ||
+          state.mode === 'seeking' || state.mode === 'backing') &&
+        fileEnvelope && fileEnvelope.length;
+      viz.hidden = !show;
+      if (!show) return;
+
+      const view = fpViewWindow();
+      const { start: viewStart, windowSec, scrolling } = view;
+      const dur = fileDuration || fileEnvelope.length / ENVELOPE_RATE;
+      const fileCanvas = $('fpFileCanvas');
+      const micCanvas = $('fpMicCanvas');
+      if (!fileCanvas || !micCanvas) return;
+
+      const fileSeries = envelopeWindowSeries(fileEnvelope, viewStart, windowSec);
+      const filePeak = fileSeries.peak;
+
+      let micXs = [];
+      let micYs = [];
+      let micPeak = 0.0001;
+      if (scrolling && (trackingLocked || hasAlign)) {
+        const live = micLiveSeries(viewStart, windowSec);
+        micXs = live.xs;
+        micYs = live.ys;
+        micPeak = live.peak;
+      } else if (clipEnv && clipEnv.length) {
+        const clipStart = scrolling ? viewStart : view.origin;
+        for (let i = 0; i < clipEnv.length; i++) {
+          micXs.push(clipEnvFileAt + i / ENVELOPE_RATE - clipStart);
+          micYs.push(clipEnv[i]);
+          if (clipEnv[i] > micPeak) micPeak = clipEnv[i];
+        }
+      }
+      const gain = Math.max(0.25, Math.min(8, filePeak / micPeak));
+      const mark = scrolling
+        ? view.playhead
+        : (hasAlign ? (alignFileAt - view.origin) : null);
+
+      const fileDraw = paintEnvelope(fileCanvas, '#123c32', mark, windowSec);
+      drawEnvelopeSeries(fileDraw.ctx, fileDraw.w, fileDraw.h, fileSeries.xs, fileSeries.ys, filePeak, windowSec);
+      if (mark != null) drawViewportMarker(fileDraw.ctx, fileDraw.w, fileDraw.h, mark, windowSec, '#b54708');
+      if (scrolling && view.playheadBackup != null) {
+        drawViewportMarker(fileDraw.ctx, fileDraw.w, fileDraw.h, view.playheadBackup, windowSec, '#123c32');
+      }
+
+      const micDraw = paintEnvelope(micCanvas, '#1b6b45', mark, windowSec);
+      const scaled = micYs.map(v => v * gain);
+      drawEnvelopeSeries(micDraw.ctx, micDraw.w, micDraw.h, micXs, scaled, filePeak, windowSec);
+      if (scrolling && clipEnv && clipEnv.length && clipCollecting) {
+        const clip = clipOverlaySeries(viewStart);
+        const clipScaled = clip.ys.map(v => v * Math.max(0.25, Math.min(8, filePeak / clip.peak)));
+        drawEnvelopeSeries(micDraw.ctx, micDraw.w, micDraw.h, clip.xs, clipScaled, filePeak, windowSec);
+      }
+      if (mark != null) drawViewportMarker(micDraw.ctx, micDraw.w, micDraw.h, mark, windowSec, '#b54708');
+
+      const viewEnd = Math.min(dur, viewStart + windowSec);
+      if (scrolling) {
+        $('fpFileLabel').textContent = 'Track · ' + fmtTime(viewStart) + ' – ' + fmtTime(viewEnd);
+        if (trackingLocked) {
+          $('fpMicLabel').textContent = clipCollecting
+            ? 'Mic · live (recording clip)'
+            : 'Mic · live (follows amp)';
+        } else {
+          $('fpMicLabel').textContent = clipCollecting
+            ? 'Mic · heard near ' + fmtTime(seekWindow().center)
+            : 'Mic · watching for amp';
+        }
+      } else {
+        $('fpFileLabel').textContent = view.origin > 0.05
+          ? ('Fingerprint from ' + fmtTime(view.origin))
+          : 'File fingerprint';
+        $('fpMicLabel').textContent = clipCollecting
+          ? 'Heard clip (recording…)'
+          : (clipEnv ? ('Heard clip @ ' + fmtTime(clipEnvFileAt)) : 'Heard clip (waiting)');
+      }
+
+      const alignBit = hasAlign ? (' · lined up @ ' + fmtTime(alignFileAt)) : '';
+      const spotBit = lastSpotStatus ? (' · ' + lastSpotStatus) : '';
+      const scrollBit = scrolling && trackingLocked
+        ? (' · scrolling @ amp ' + fmtTime(roomPosition()))
+        : (scrolling ? (' · seeking ' + fmtTime(seekWindow().center)) : '');
+      $('fpMeta').textContent =
+        (scrolling
+          ? ('Window ' + windowSec.toFixed(0) + ' s · ')
+          : ((view.origin > 0.05 ? ('From first sound @ ' + fmtTime(view.origin) + ' · ') : 'From start · '))) +
+        (templateIndex ? (templateIndex.hashCount + ' peak-hashes') : 'no hashes') +
+        ' · clip ' + lastClipHits + ' hits' + scrollBit + alignBit + spotBit;
+    }
+
+    function matchBurstSequence(micBursts, fileBurstList) {
+      if (!micBursts.length) {
+        return { position: 0, score: 0, gated: true, count: 0, pairs: [], skippedMic: [], skippedFile: [] };
+      }
+      if (!fileBurstList.length) {
+        return { position: 0, score: 0, gated: false, count: micBursts.length, pairs: [], skippedMic: [], skippedFile: [] };
+      }
+      const aligned = alignBursts(micBursts, fileBurstList);
+      return {
+        position: aligned.position,
+        score: aligned.score,
+        gated: false,
+        count: aligned.matches,
+        pairs: aligned.pairs,
+        skippedMic: aligned.skippedMic,
+        skippedFile: aligned.skippedFile
+      };
+    }
+
+    function speechSeconds(bursts) {
+      let s = 0;
+      for (let i = 0; i < bursts.length; i++) s += bursts[i].dur;
+      return s;
+    }
+
+    function fileExpectsSpeechAt(sec) {
+      if (!fileBursts.length) return false;
+      const t0 = sec;
+      const t1 = sec + FILE_LOOKAHEAD_SEC;
+      for (let i = 0; i < fileBursts.length; i++) {
+        const b = fileBursts[i];
+        if (b.end > t0 && b.start < t1) return true;
+      }
+      return false;
+    }
+
+    function roomPosition() {
+      // Amp clock is always the user-started manual clock; trail only shifts the backup.
+      if (state.mode === 'backing' && backupAudio && manualStartedAt) {
+        return manualClockSec();
+      }
+      if (state.mode === 'manual' || state.mode === 'backing') {
+        return manualClockSec();
+      }
+      if (trackingLocked && lockClockAt) {
+        return lockPositionSec + (Date.now() - lockClockAt) / 1000;
+      }
+      return trackedPosition;
+    }
+
+    function backupPosition() {
+      // Backup lags amp by the trail amount; during active playback, use the audio clock.
+      if (state.mode === 'backing' && backupAudio) return backupAudio.currentTime;
+      return Math.max(0, manualClockSec() - effectiveTrailMs() / 1000);
+    }
+
+    function noteMicEnergy(rms) {
+      const enter = state.settings.silenceThreshold;
+      const leave = enter * 0.65;
+      if (!liveBurst) {
+        if (rms > enter) {
+          liveBurst = { start: performance.now() / 1000, samples: [rms], sum: rms, peak: rms };
+        }
+        return false;
+      }
+      if (rms > leave) {
+        liveBurst.samples.push(rms);
+        liveBurst.sum += rms;
+        if (rms > liveBurst.peak) liveBurst.peak = rms;
+        return false;
+      }
+      const done = finishBurst(liveBurst);
+      liveBurst = null;
+      if (done) {
+        completedMicBursts.push(done);
+        completedMicBursts = mergeCloseBursts(completedMicBursts);
+        if (completedMicBursts.length > 24) completedMicBursts.shift();
+        return true;
+      }
+      return false;
+    }
+
+    function syncBackupPlayer() {
+      if (!backupAudio || state.mode === 'cutout' || !trackingLocked) return;
+      if (pendingPlayTimer) return;
+      if (backupAudio.paused && state.mode === 'armed') {
+        backupAudio.play().catch(() => {});
+      }
+    }
+
+    function tickListen() {
+      const rms = rmsFromAnalyser();
+      const pct = Math.min(100, (rms / MIC_METER_MAX) * 100);
+      $('micMeterFill').style.width = pct + '%';
+      noteAmbient(rms);
+      noteMicEnvelope(rms);
+      updateCalibratorUi(rms);
+      maybeAutoCalibrateSilence();
+
+      noteMicEnergy(rms);
+      if (rms > state.settings.silenceThreshold) lastSpeechAt = Date.now();
+      if (state.analysing) return;
+
+      if (state.mode === 'primed') {
+        beginClipIfNeeded(rms);
+        tickPrimedViz();
+      } else if (state.mode === 'manual') {
+        beginClipIfNeeded(rms);
+        const room = roomPosition();
+        trackedPosition = backupPosition();
+        fileExpectsSpeech = fileExpectsSpeechAt(room);
+        const heardSpeech = rms > state.settings.silenceThreshold || !!liveBurst;
+        if (heardSpeech) lastSpeechAt = Date.now();
+        noteUnexpectedSilence(fileExpectsSpeech, heardSpeech);
+        if (heardSpeech && unexpectedSilenceMs === 0) inLogicalSync = true;
+        if (trackingLocked) maybeSpotCheck(rms);
+        checkCutout();
+        tickPrimedViz();
+      } else if (state.mode === 'seeking') {
+        beginClipIfNeeded(rms);
+        tickPrimedViz();
+      } else if (state.mode === 'armed') {
+        maybeSpotCheck(rms);
+        tickArmed(rms);
+      }
+
+      updateProgressDisplay();
+    }
+
+    function tickPrimedViz() {
+      updateUI();
+    }
+
+    async function activateSync(fingerprintSec, confirmMs) {
+      const roomNow = fingerprintSec + confirmMs / 1000;
+
+      const backupNow = manualClockSec();
+      const computedTrail = normalizeTrailMs((roomNow - backupNow) * 1000);
+      manualMeasuredTrailMs = computedTrail;
+      lockedBufferMs = normalizeTrailMs(manualMeasuredTrailMs + manualTrailAdjustMs);
+      state.settings.bufferDelayMs = lockedBufferMs;
+      syncBufferDelayUi();
+      lockPositionSec = roomNow;
+      lockClockAt = Date.now();
+      trackingLocked = true;
+      trackedPosition = Math.max(0, roomNow - lockedBufferMs / 1000);
+      lastSpeechAt = Date.now();
+      silenceSince = null;
+      resetCutoutState();
+      resetConfirmHold();
+      inLogicalSync = true;
+      hasAlign = true;
+      alignPerfAt = performance.now() / 1000;
+      alignFileAt = roomNow;
+      spotChecksDone = 0;
+      nextSpotAt = Date.now() + SPOT_WAIT_MS;
+      lastSpotStatus = 'trail measured · spot check in ~1 min';
+      manualMissStreak = 0;
+      if (pendingPlayTimer) {
+        clearTimeout(pendingPlayTimer);
+        pendingPlayTimer = null;
+      }
+      setMode('manual');
+      updateUI();
+    }
+
+    function resetCutoutState() {
+      silenceSince = null;
+      unexpectedSilenceMs = 0;
+      micSpeechStartedAt = null;
+      cutoutCooldownUntil = 0;
+      cutoutVerifyPending = false;
+      cutoutVerifyMode = false;
+      cutoutVerifyStartedAt = 0;
+    }
+
+    function noteUnexpectedSilence(fileExpects, heardSpeech) {
+      if (!fileExpects) {
+        unexpectedSilenceMs = 0;
+        micSpeechStartedAt = null;
+        silenceSince = null;
+        return;
+      }
+      if (heardSpeech) {
+        if (!micSpeechStartedAt) micSpeechStartedAt = Date.now();
+        silenceSince = null;
+        const speechMs = Date.now() - micSpeechStartedAt;
+        if (speechMs >= CUTOUT_BLIP_MS) unexpectedSilenceMs = 0;
+      } else {
+        if (micSpeechStartedAt) {
+          const blipMs = Date.now() - micSpeechStartedAt;
+          micSpeechStartedAt = null;
+          if (blipMs < CUTOUT_BLIP_MS) {
+            unexpectedSilenceMs += LISTEN_MS;
+            if (!silenceSince) silenceSince = Date.now();
+          }
+        } else {
+          unexpectedSilenceMs += LISTEN_MS;
+          if (!silenceSince) silenceSince = Date.now();
+        }
+      }
+    }
+
+    function maybeCutoutVerify(rms) {
+      if (!cutoutVerifyPending || state.mode !== 'armed') return;
+      if (clipCollecting || clipBusy) return;
+      if (rms <= state.settings.silenceThreshold) return;
+      cutoutVerifyMode = true;
+      spotFileStart = roomPosition();
+      beginClipCollect();
+      updateUI();
+    }
+
+    function tickArmed(rms) {
+      const room = roomPosition();
+      trackedPosition = Math.max(0, room - lockedBufferMs / 1000);
+      fileExpectsSpeech = fileExpectsSpeechAt(room);
+      const heardSpeech = rms > state.settings.silenceThreshold || !!liveBurst;
+
+      if (heardSpeech) lastSpeechAt = Date.now();
+      noteUnexpectedSilence(fileExpectsSpeech, heardSpeech);
+      if (heardSpeech && unexpectedSilenceMs === 0) inLogicalSync = true;
+
+      maybeCutoutVerify(rms);
+      if (cutoutVerifyPending && cutoutVerifyStartedAt &&
+          Date.now() - cutoutVerifyStartedAt > 45000) {
+        cutoutVerifyPending = false;
+        cutoutCooldownUntil = Date.now() + CUTOUT_COOLDOWN_MS;
+        lastSpotStatus = 'sync check timed out — cutout paused';
+      }
+      syncBackupPlayer();
+      checkCutout();
+      updateUI();
+    }
+
+    function checkCutout() {
+      if (!trackingLocked) return;
+      if (cutoutVerifyPending) return;
+      if (Date.now() < cutoutCooldownUntil) return;
+      if (!fileExpectsSpeech) return;
+      if (unexpectedSilenceMs < cutoutTriggerMs()) return;
+      if (fileDuration && roomPosition() / fileDuration > FILE_END_THRESHOLD) return;
+
+      if (backupAudio) backupAudio.pause();
+      inLogicalSync = false;
+      setMode('cutout');
+    }
+
+    async function requestWakeLock() {
+      if (!('wakeLock' in navigator)) return;
+      try {
+        wakeLock = await navigator.wakeLock.request('screen');
+        wakeLock.addEventListener('release', () => { wakeLock = null; });
+      } catch { /* ignore */ }
+    }
+
+    function releaseWakeLock() {
+      if (wakeLock) {
+        wakeLock.release().catch(() => {});
+        wakeLock = null;
+      }
+    }
+
+    async function prime() {
+      const track = selectedTrack();
+      if (!track) return;
+      try {
+        ensureAudioCtx();
+        lastMatchGated = true;
+        lastMatchScore = 0;
+        lastMatchBurstCount = 0;
+        completedMicBursts = [];
+        liveBurst = null;
+        fileBursts = [];
+        startBursts = [];
+        state.analysing = true;
+        setMode('manual');
+
+        micStream = await navigator.mediaDevices.getUserMedia({
+          audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+          video: false
+        });
+        micSource = audioCtx.createMediaStreamSource(micStream);
+        analyser = audioCtx.createAnalyser();
+        analyser.fftSize = 2048;
+        micSource.connect(analyser);
+        timeDomainBuf = new Float32Array(analyser.fftSize);
+
+        if (listenTimer) clearInterval(listenTimer);
+        listenTimer = setInterval(tickListen, LISTEN_MS);
+        await requestWakeLock();
+
+        fileBuffer = null;
+        const indexed = await ensureIndexed(track, true);
+        hydrateFingerprint(indexed.packed);
+        if (indexed.buffer) fileBuffer = indexed.buffer;
+        track.fpCached = true;
+        lastMatchAlign = { pairs: [], skippedMic: [], skippedFile: [] };
+        lastClipStatus = 'waiting';
+        lastClipHits = 0;
+        lastClipOffset = 0;
+        lastClipContrast = 0;
+        lastClipCoverage = 0;
+        lastClipFail = '';
+        lastClipGapScore = 0;
+        lastClipGapBit = '';
+        hitStreak = 0;
+        lastHitOffset = 0;
+        lastHitPerf = 0;
+        clipLog = [];
+        lockReason = '';
+        lastMatchScore = 0;
+        strongLockMs = 0;
+        hasAlign = false;
+        clipEnv = null;
+        clipEnvFileAt = 0;
+        micEnvT = [];
+        micEnvV = [];
+        spotMode = false;
+        spotChecksDone = 0;
+        nextSpotAt = 0;
+        lastSpotStatus = '';
+        startClipCapture();
+        if (!captureNode) throw new Error('This browser cannot capture mic clips for matching.');
+        track.duration = fileDuration;
+
+        backupAudio = new Audio(track.url);
+        backupAudio.preload = 'auto';
+        backupAudio.volume = 0;
+        backupAudio.playbackRate = 1;
+
+        trackedPosition = 0;
+        lastSpeechAt = Date.now();
+        resetCutoutState();
+        inLogicalSync = false;
+        fileExpectsSpeech = false;
+        ambientRing = [];
+        ambientRms = 0;
+        resetConfirmHold();
+        lockPositionSec = 0;
+        lockClockAt = 0;
+        lockedBufferMs = 0;
+        manualMeasuredTrailMs = 0;
+        manualTrailAdjustMs = 0;
+        trackingLocked = false;
+        manualStartedAt = 0;
+        manualBaseSec = 0;
+        manualTemplate = null;
+        manualWinStart = -1;
+        manualWinDur = 0;
+        manualWinWide = false;
+        manualMissStreak = 0;
+        if (pendingPlayTimer) { clearTimeout(pendingPlayTimer); pendingPlayTimer = null; }
+
+        state.analysing = false;
+        manualBaseSec = 0;
+        manualStartedAt = Date.now();
+        renderTrackList();
+        updateUI();
+        if (!fileBuffer && track.file) {
+          track.file.arrayBuffer()
+            .then(ab => audioCtx.decodeAudioData(ab.slice(0)))
+            .then(buf => { if (state.mode !== 'idle') fileBuffer = buf; })
+            .catch(err => console.warn('Background decode failed', err));
+        }
+      } catch (err) {
+        console.error(err);
+        await disarm(false);
+        alert(err.name === 'NotAllowedError'
+          ? 'Microphone permission is required to listen and sync.'
+          : 'Could not arm backup: ' + (err.message || err));
+      }
+    }
+
+    async function disarm(resetProgress) {
+      if (listenTimer) { clearInterval(listenTimer); listenTimer = null; }
+      if (pendingPlayTimer) { clearTimeout(pendingPlayTimer); pendingPlayTimer = null; }
+      stopClipCapture();
+      templateIndex = null;
+      seekTemplate = null;
+      seekWinStart = -1;
+
+      if (backupAudio) {
+        backupAudio.pause();
+        backupAudio.src = '';
+        backupAudio = null;
+      }
+
+      if (micSource) { micSource.disconnect(); micSource = null; }
+      if (micStream) {
+        micStream.getTracks().forEach(t => t.stop());
+        micStream = null;
+      }
+      analyser = null;
+      timeDomainBuf = null;
+      fileBuffer = null;
+      fileEnvelope = null;
+      fileBursts = [];
+      startBursts = [];
+      liveBurst = null;
+      completedMicBursts = [];
+      clipEnv = null;
+      clipEnvFileAt = 0;
+      micEnvT = [];
+      micEnvV = [];
+      hasAlign = false;
+      spotMode = false;
+      spotChecksDone = 0;
+      nextSpotAt = 0;
+      lastSpotStatus = '';
+      state.analysing = false;
+
+      releaseWakeLock();
+
+      if (resetProgress !== false) trackedPosition = 0;
+
+      resetCutoutState();
+      lastMatchScore = 0;
+      strongLockMs = 0;
+      lastMatchGated = true;
+      lastMatchBurstCount = 0;
+      inLogicalSync = false;
+      fileExpectsSpeech = false;
+      resetConfirmHold();
+      lockPositionSec = 0;
+      lockClockAt = 0;
+      lockedBufferMs = 0;
+      manualMeasuredTrailMs = 0;
+      manualTrailAdjustMs = 0;
+      trackingLocked = false;
+      manualStartedAt = 0;
+      manualBaseSec = 0;
+
+      setMode('idle');
+      updateProgressDisplay();
+    }
+
+    async function takeOver() {
+      if (!backupAudio) return;
+      if (pendingPlayTimer) { clearTimeout(pendingPlayTimer); pendingPlayTimer = null; }
+      backupAudio.volume = 1;
+      backupAudio.currentTime = Math.max(0, roomPosition() - effectiveTrailMs() / 1000);
+      await backupAudio.play();
+      setMode('backing');
+
+      if (listenTimer) { clearInterval(listenTimer); listenTimer = null; }
+
+      backupAudio.onended = () => {
+        disarm(true);
+      };
+
+      const progressInterval = setInterval(() => {
+        if (state.mode !== 'backing') { clearInterval(progressInterval); return; }
+        updateProgressDisplay();
+        if (showDebug || showViz) renderFingerprintViz();
+      }, 200);
+    }
+
+    function dismissCutout() {
+      unexpectedSilenceMs = 0;
+      micSpeechStartedAt = null;
+      silenceSince = null;
+      lastSpeechAt = Date.now();
+      inLogicalSync = true;
+      cutoutVerifyPending = false;
+      cutoutVerifyStartedAt = 0;
+      cutoutCooldownUntil = Date.now() + CUTOUT_COOLDOWN_MS;
+      lastSpotStatus = 'tracking resumed';
+      setMode('manual');
+      if (!listenTimer) listenTimer = setInterval(tickListen, LISTEN_MS);
+      updateUI();
+    }
+
+    $('btnLoadFolder').addEventListener('click', () => chooseFolder());
+    $('folderInput').addEventListener('change', handleFolderPick);
+    $('btnForgetLibrary').addEventListener('click', () => forgetLibrary());
+    $('btnForgetFingerprints').addEventListener('click', () => forgetFingerprints());
+    $('btnCopyLog').addEventListener('click', () => copyDiagnostics());
+    $('btnShareLog').addEventListener('click', () => shareDiagnostics());
+
+    $('btnMain').addEventListener('click', async () => {
+      if (state.mode === 'idle') await prime();
+      else if (state.mode === 'manual' || state.mode === 'armed' ||
+        state.mode === 'cutout' || state.mode === 'seeking') await disarm(true);
+      else if (state.mode === 'backing') pauseBackupAndSeek();
+    });
+
+    bindTrailHold($('btnTrailDown'), -TRAIL_STEP_MS, -TRAIL_HOLD_STEP_MS);
+    bindTrailHold($('btnTrailUp'), TRAIL_STEP_MS, TRAIL_HOLD_STEP_MS);
+
+    $('btnTakeOver').addEventListener('click', takeOver);
+    $('btnDismissCutout').addEventListener('click', dismissCutout);
+
+    $('btnReload').addEventListener('click', () => {
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.getRegistrations().then(regs => regs.forEach(r => r.unregister()));
+      }
+      location.reload();
+    });
+
+    $('btnViz').addEventListener('click', () => {
+      showViz = !showViz;
+      applyVizUi();
+      scheduleSaveSettings();
+    });
+
+    $('btnDebug').addEventListener('click', () => {
+      showDebug = !showDebug;
+      applyDebugUi();
+      scheduleSaveSettings();
+      updateUI();
+    });
+
+    $('btnSettingsLock').addEventListener('click', e => {
+      e.preventDefault();
+      e.stopPropagation();
+      settingsLocked = !settingsLocked;
+      applySettingsLockUi();
+      scheduleSaveSettings();
+    });
+
+    $('settingsPanel').addEventListener('toggle', () => {
+      if (settingsLocked) $('settingsPanel').open = true;
+    });
+
+    $('bufferDelay').addEventListener('input', e => {
+      const next = normalizeTrailMs(+e.target.value);
+      state.settings.bufferDelayMs = next;
+      if (trackingLocked && manualMeasuredTrailMs) {
+        manualTrailAdjustMs = next - manualMeasuredTrailMs;
+        lockedBufferMs = next;
+        manualTemplate = null;
+        manualWinStart = -1;
+        manualWinDur = 0;
+      } else if (trackingLocked) {
+        lockedBufferMs = next;
+      }
+      syncBufferDelayUi();
+      applyTrailToPlayback();
+      scheduleSaveSettings();
+    });
+    $('silenceThreshold').addEventListener('input', e => {
+      silenceManual = true;
+      setSilenceThreshold(+e.target.value);
+      scheduleSaveSettings();
+    });
+    $('silenceDuration').addEventListener('input', e => {
+      state.settings.silenceDurationMs = +e.target.value;
+      $('silenceDurationVal').textContent = fmtSettingMs(state.settings.silenceDurationMs);
+      scheduleSaveSettings();
+    });
+    $('fingerprintSec').addEventListener('input', e => {
+      state.settings.fingerprintSec = +e.target.value;
+      $('fingerprintSecVal').textContent = state.settings.fingerprintSec + ' s';
+      scheduleSaveSettings();
+      markCachedFlags().then(() => renderTrackList()).catch(() => {});
+    });
+    $('clipSec').addEventListener('input', e => {
+      state.settings.clipSec = +e.target.value;
+      $('clipSecVal').textContent = state.settings.clipSec + ' s';
+      scheduleSaveSettings();
+    });
+    $('matchThreshold').addEventListener('input', e => {
+      state.settings.matchThreshold = +e.target.value;
+      $('matchThresholdVal').textContent = state.settings.matchThreshold.toFixed(2);
+      scheduleSaveSettings();
+    });
+    $('confirmHold').addEventListener('input', e => {
+      state.settings.confirmHoldMs = +e.target.value;
+      $('confirmHoldVal').textContent = fmtSettingMs(state.settings.confirmHoldMs);
+      scheduleSaveSettings();
+    });
+    $('patternBlur').addEventListener('input', e => {
+      state.settings.patternBlurMs = +e.target.value;
+      $('patternBlurVal').textContent = Math.round(state.settings.patternBlurMs) + ' ms';
+      scheduleSaveSettings();
+    });
+    $('gapConfidenceWeight').addEventListener('input', e => {
+      state.settings.gapConfidenceWeight = +e.target.value;
+      $('gapConfidenceWeightVal').textContent = state.settings.gapConfidenceWeight.toFixed(2);
+      updateClipConfidenceMeter();
+      scheduleSaveSettings();
+    });
+    $('gapConfidenceBoost').addEventListener('input', e => {
+      state.settings.gapConfidenceBoost = +e.target.value;
+      $('gapConfidenceBoostVal').textContent = state.settings.gapConfidenceBoost.toFixed(1) + '×';
+      updateClipConfidenceMeter();
+      scheduleSaveSettings();
+    });
+    $('btnBlurFromFile').addEventListener('click', () => {
+      const ms = suggestedPatternBlurMs();
+      state.settings.patternBlurMs = ms;
+      $('patternBlur').value = String(ms);
+      $('patternBlurVal').textContent = ms + ' ms';
+      scheduleSaveSettings();
+      updatePatternBlurHint();
+    });
+
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('./service-worker.js?v=' + APP_VER).catch(() => {});
+    }
+
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible' && (state.mode === 'primed' || state.mode === 'manual' ||
+        state.mode === 'armed' || state.mode === 'cutout' || state.mode === 'seeking')) {
+        requestWakeLock();
+        if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+      }
+    });
+
+    updateUI();
+    restoreSettings().then(() => {
+      applyDebugUi();
+      applyVizUi();
+      applySettingsLockUi();
+      restoreLibrary();
+    });
+  </script>
+  <script>window.PWA_INSTALL = { slug: 'audio-backup-helper', name: 'Back Me Up' };</script>
+  <script src="./install.js?v=2"></script>
+</body>
+</html>
