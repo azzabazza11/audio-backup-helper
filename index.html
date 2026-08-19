@@ -1582,19 +1582,18 @@
       } else if (state.mode === 'manual') {
         pill.classList.add('listening');
         if (state.analysing) {
-          $('statusText').textContent = 'Starting manual tracking…';
-        } else if (clipCollecting) {
-          $('statusText').textContent = 'Tracking · recording clip';
+          $('statusText').textContent = 'Starting tracking…';
+        } else if (trackingLocked) {
+          const trailSec = Math.round(effectiveTrailMs() / 1000);
+          $('statusText').textContent = 'Locked · ' + trailSec + ' s trail · Take Over when ready';
         } else if (confirmStartedAt) {
           const held = (confirmHeldMs / 1000).toFixed(1);
           const need = (state.settings.confirmHoldMs / 1000).toFixed(1);
-          $('statusText').textContent = 'Tracking · matching ' + held + ' / ' + need + ' s';
-        } else if (trackingLocked) {
-          $('statusText').textContent = 'Tracking · trail measured';
+          $('statusText').textContent = 'Locking · ' + held + ' / ' + need + ' s';
         } else if (lastClipStatus === 'miss') {
-          $('statusText').textContent = 'Tracking · clip missed';
+          $('statusText').textContent = 'Listening · no match yet';
         } else {
-          $('statusText').textContent = 'Tracking · listening for match';
+          $('statusText').textContent = 'Listening · waiting for match';
         }
         btn.textContent = 'Stop';
         btn.className = 'btn';
@@ -2634,6 +2633,8 @@
 
     function beginClipIfNeeded(rms) {
       if (!isClipMatchMode() || state.analysing || clipCollecting || clipBusy) return;
+      // After lock, only spot checks collect clips — regular matching is suppressed.
+      if (state.mode === 'manual' && trackingLocked) return;
       if ((state.mode === 'primed' || state.mode === 'manual') && !templateIndex) return;
       if (state.mode === 'seeking' && !fileBuffer) return;
       if (rms <= state.settings.silenceThreshold) return;
