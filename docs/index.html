@@ -3759,6 +3759,8 @@
       nextSpotAt = Date.now() + SPOT_WAIT_MS;
       lastSpotStatus = 'trail measured · spot check in ~1 min';
       manualMissStreak = 0;
+      // Grace period after lock — give the system time to stabilise before cutout can fire.
+      cutoutCooldownUntil = Date.now() + CUTOUT_COOLDOWN_MS;
       if (pendingPlayTimer) {
         clearTimeout(pendingPlayTimer);
         pendingPlayTimer = null;
