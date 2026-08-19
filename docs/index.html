@@ -2122,9 +2122,13 @@
       if (found < needFound) {
         reasons.push('only ' + found + ' clip hashes exist in the file (need ≥ ' + needFound + ')');
       }
-      if (coverage < MIN_CLIP_COVERAGE) {
+      // Allow lower coverage when score and idf are both very high — sparse-hash tracks.
+      const coverageFloor = (score >= 0.95 && result.hits >= needHits * 1.5)
+        ? MIN_CLIP_COVERAGE * 0.6
+        : MIN_CLIP_COVERAGE;
+      if (coverage < coverageFloor) {
         reasons.push('cover ' + Math.round(coverage * 100) + '% of matched hashes < ' +
-          Math.round(MIN_CLIP_COVERAGE * 100) + '%');
+          Math.round(coverageFloor * 100) + '%');
       }
       if (result.gapUsable && result.gapScore < MIN_GAP_SCORE) {
         reasons.push('gaps ' + Math.round(result.gapScore * 100) + '% quiet in file pauses < ' +
