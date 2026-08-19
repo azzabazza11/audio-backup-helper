@@ -351,17 +351,19 @@
     }
 
     .mic-meter {
-      position: relative; height: 8px; background: var(--bg); border-radius: 999px;
-      border: 1px solid var(--line); overflow: hidden; margin-top: 10px;
+      position: relative; height: 32px;
+      display: flex; align-items: center; gap: 2px;
+      margin-top: 10px; overflow: hidden;
     }
-    .mic-meter-fill {
-      height: 100%; width: 0%; background: var(--ok);
-      border-radius: 999px; transition: width 0.08s linear;
+    .mic-meter-fill { display: none; }
+    .mic-meter-mark { display: none; }
+    .mic-pill-bar {
+      flex: 1; border-radius: 999px;
+      background: var(--ok); opacity: 0.85;
+      transition: height 0.07s ease-out;
+      min-height: 3px; max-height: 32px;
     }
-    .mic-meter-mark {
-      position: absolute; top: 0; bottom: 0; width: 2px;
-      background: var(--warn); transform: translateX(-1px); pointer-events: none;
-    }
+    .mic-pill-bar.quiet { background: var(--line); opacity: 0.5; }
     .cal-meter {
       position: relative; flex: 1.2; height: 10px;
       background: var(--bg); border: 1px solid var(--line);
@@ -452,6 +454,14 @@
       opacity: 0.7;
       text-align: center;
     }
+    .ver-note {
+      margin: 2px 0 0;
+      color: var(--muted);
+      font-size: 0.70rem;
+      opacity: 0.6;
+      text-align: center;
+      font-style: italic;
+    }
 
     @media (prefers-reduced-motion: reduce) {
       *, *::before, *::after {
@@ -522,10 +532,7 @@
       <span class="mono trail-val" id="trailVal">2 s</span>
       <button type="button" class="trail-btn" id="btnTrailUp" aria-label="Increase trail time">+</button>
     </div>
-    <div class="mic-meter" id="micMeterWrap" hidden>
-      <div class="mic-meter-fill" id="micMeterFill"></div>
-      <div class="mic-meter-mark" id="micMeterMark"></div>
-    </div>
+    <div class="mic-meter" id="micMeterWrap" hidden></div>
     <p class="sync-line" id="syncLine" hidden></p>
     <div class="fp-viz" id="fpViz" hidden>
       <p class="fp-meta mono" id="fpMeta"></p>
@@ -627,6 +634,7 @@
   </details>
 
   <p class="ver mono" id="appVer">v1.6.0</p>
+  <p class="ver-note" id="appVerNote" hidden>No clip matching after lock · coverage gate relaxed for high-score clips · stronger sticky lock · numbered log timestamps</p>
 
   <div class="bottom-bar">
     <p class="bottom-hint" id="mainBtnHint">Press to start tracking · Take Over when ready</p>
@@ -1782,10 +1790,8 @@
       const gatePct = Math.min(100, (gate / SILENCE_MAX) * 100);
       const fill = $('calRoomFill');
       const mark = $('calGateMark');
-      const micMark = $('micMeterMark');
       if (fill) fill.style.width = livePct + '%';
       if (mark) mark.style.left = gatePct + '%';
-      if (micMark) micMark.style.left = Math.min(100, (gate / MIC_METER_MAX) * 100) + '%';
       const lab = $('calRoomVal');
       if (lab) lab.textContent = live ? live.toFixed(3) : '—';
       const hint = $('calHint');
@@ -2160,6 +2166,8 @@
       if (log) log.hidden = !showDebug;
       const actions = document.querySelector('.trigger-actions');
       if (actions) actions.hidden = !showDebug;
+      const verNote = $('appVerNote');
+      if (verNote) verNote.hidden = !showDebug;
       if (showDebug || showViz) renderFingerprintViz();
     }
 
@@ -3553,10 +3561,40 @@
       }
     }
 
+    const MIC_PILL_COUNT = 40;
+    const micPillRing = new Float32Array(MIC_PILL_COUNT);
+    let micPillHead = 0;
+
+    function tickMicPills(rms) {
+      micPillRing[micPillHead % MIC_PILL_COUNT] = rms;
+      micPillHead++;
+      const wrap = $('micMeterWrap');
+      if (!wrap || wrap.hidden) return;
+      // Build bars on first call or if count drifted.
+      if (wrap.children.length !== MIC_PILL_COUNT) {
+        wrap.innerHTML = '';
+        for (let i = 0; i < MIC_PILL_COUNT; i++) {
+          const b = document.createElement('div');
+          b.className = 'mic-pill-bar';
+          wrap.appendChild(b);
+        }
+      }
+      const bars = wrap.children;
+      const gate = state.settings.silenceThreshold;
+      const peak = Math.max(MIC_METER_MAX * 0.05, ...micPillRing);
+      for (let i = 0; i < MIC_PILL_COUNT; i++) {
+        const idx = (micPillHead - MIC_PILL_COUNT + i + MIC_PILL_COUNT * 2) % MIC_PILL_COUNT;
+        const v = micPillRing[idx];
+        const h = Math.max(3, Math.round((v / peak) * 32));
+        const bar = bars[i];
+        bar.style.height = h + 'px';
+        bar.classList.toggle('quiet', v <= gate);
+      }
+    }
+
     function tickListen() {
       const rms = rmsFromAnalyser();
-      const pct = Math.min(100, (rms / MIC_METER_MAX) * 100);
-      $('micMeterFill').style.width = pct + '%';
+      tickMicPills(rms);
       noteAmbient(rms);
       noteMicEnvelope(rms);
       updateCalibratorUi(rms);
