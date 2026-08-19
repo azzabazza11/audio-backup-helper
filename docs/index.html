@@ -386,7 +386,11 @@
     }
     .sync-line strong { color: var(--ink); font-weight: 600; }
     .fp-viz { margin-top: 12px; }
-    .trigger-box { margin-top: 12px; }
+    .trigger-box {
+      margin-top: 12px;
+      touch-action: pan-y;
+      overscroll-behavior: contain;
+    }
     .conf-row {
       display: flex; align-items: center; gap: 10px;
       margin: 6px 0 8px;
@@ -414,7 +418,8 @@
       margin: 0; padding: 8px 12px 8px 28px;
       background: var(--bg); border: 1px solid var(--line);
       border-radius: 8px; font-size: 0.72rem; color: var(--muted);
-      line-height: 1.45; max-height: 220px; overflow-y: auto;
+      line-height: 1.45;
+      height: 220px; overflow-y: scroll;
       overscroll-behavior: contain;
       -webkit-overflow-scrolling: touch;
       touch-action: pan-y;
