@@ -804,7 +804,7 @@
     <button type="button" class="btn" id="btnForgetFingerprints" style="width:100%;margin-top:8px">Clear stored fingerprints</button>
   </details>
 
-  <p class="ver mono" id="appVer">v1.6.4</p>
+  <p class="ver mono" id="appVer">v1.6.4 · 2026-08-20 22:36</p>
   <p class="ver-note" id="appVerNote" hidden>Lock cleanup · playback transport only while playing · volume slider stays open while adjusting</p>
 
   <div class="bottom-bar">
@@ -824,6 +824,7 @@
   <script>
     const $ = id => document.getElementById(id);
     const APP_VER = '1.6.4';
+    const APP_BUILD = '2026-08-20 22:36';
 
     const ENVELOPE_RATE = 20;
     const TRAIL_STEP_MS = 1000;
@@ -2519,6 +2520,11 @@
       if (showDebug || showViz) renderFingerprintViz();
     }
 
+    function applyVersionUi() {
+      const el = $('appVer');
+      if (el) el.textContent = 'v' + APP_VER + ' · ' + APP_BUILD;
+    }
+
     function applyDebugUi() {
       const btn = $('btnDebug');
       if (btn) {
@@ -2805,7 +2811,7 @@
     function diagnosticText() {
       const track = selectedTrack();
       const lines = [
-        'Back Me Up diagnostics v' + APP_VER,
+        'Back Me Up diagnostics v' + APP_VER + ' · build ' + APP_BUILD,
         new Date().toISOString(),
         'mode=' + state.mode + (trackingLocked ? ' locked' : ''),
         'track=' + (track ? track.name : '(none)'),
@@ -4835,6 +4841,7 @@
       }
     });
 
+    applyVersionUi();
     updateUI();
     restoreSettings().then(() => {
       applyDebugUi();
