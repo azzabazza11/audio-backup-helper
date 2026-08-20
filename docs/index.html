@@ -258,8 +258,8 @@
       display: flex;
       flex-direction: column;
       align-items: center;
-      gap: 10px;
-      padding: 14px 12px 12px;
+      gap: 8px;
+      padding: 16px 14px 12px;
       background: var(--paper);
       border: 1px solid var(--line);
       border-radius: 16px;
@@ -268,20 +268,57 @@
       opacity: 1;
       transition: opacity 0.45s ease;
       pointer-events: auto;
+      touch-action: none;
     }
     .vol-popover.fading { opacity: 0; pointer-events: none; }
     .vol-popover[hidden] { display: none !important; }
-    .vol-slider {
-      -webkit-appearance: slider-vertical;
-      appearance: slider-vertical;
-      writing-mode: vertical-lr;
-      direction: rtl;
-      width: 36px;
+    .vol-slider-wrap {
+      width: 44px;
       height: 160px;
-      padding: 0;
-      margin: 0;
-      accent-color: var(--accent);
+      display: flex;
+      align-items: center;
+      justify-content: center;
       touch-action: none;
+    }
+    .vol-slider {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 160px;
+      height: 36px;
+      margin: 0;
+      transform: rotate(-90deg);
+      transform-origin: center center;
+      background: transparent;
+      touch-action: none;
+      accent-color: var(--accent);
+    }
+    .vol-slider::-webkit-slider-runnable-track {
+      height: 8px;
+      border-radius: 999px;
+      background: var(--line);
+    }
+    .vol-slider::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 28px;
+      height: 28px;
+      margin-top: -10px;
+      border-radius: 50%;
+      background: var(--accent);
+      border: 2px solid var(--paper);
+      box-shadow: 0 1px 4px rgba(0,0,0,0.25);
+    }
+    .vol-slider::-moz-range-track {
+      height: 8px;
+      border-radius: 999px;
+      background: var(--line);
+    }
+    .vol-slider::-moz-range-thumb {
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      background: var(--accent);
+      border: 2px solid var(--paper);
     }
     .vol-label {
       font-size: 0.92rem;
@@ -293,7 +330,7 @@
     .vol-sub {
       font-size: 0.72rem;
       color: var(--muted);
-      margin-top: -6px;
+      margin-top: -2px;
     }
     .bottom-hint {
       margin: 0 0 8px; text-align: center;
@@ -656,7 +693,9 @@
       <button type="button" class="playback-btn" id="btnVol" aria-label="Volume" aria-pressed="false">Vol</button>
       <button type="button" class="playback-btn" id="btnSeekFwd" aria-label="Seek forward 10 seconds">+10s</button>
       <div class="vol-popover" id="volPopover" hidden>
-        <input type="range" class="vol-slider" id="volSlider" min="0" max="100" step="1" value="100" aria-label="Volume" />
+        <div class="vol-slider-wrap">
+          <input type="range" class="vol-slider" id="volSlider" min="0" max="100" step="1" value="100" aria-label="Volume" />
+        </div>
         <span class="mono vol-label" id="volLabel">100%</span>
         <span class="mono vol-sub" id="volDb">0.0 dB</span>
       </div>
@@ -766,7 +805,7 @@
   </details>
 
   <p class="ver mono" id="appVer">v1.6.4</p>
-  <p class="ver-note" id="appVerNote" hidden>Lock cleanup: clips need fileBuffer only · soft gaps · near-miss keeps streak · forward-wide search · playback transport in settings</p>
+  <p class="ver-note" id="appVerNote" hidden>Lock cleanup · playback transport only while playing · volume slider stays open while adjusting</p>
 
   <div class="bottom-bar">
     <p class="bottom-hint" id="mainBtnHint">Press to start tracking · Take Over when ready</p>
@@ -836,7 +875,7 @@
     const FP_HOP_SEC = FP_HOP / FP_SR;
     const SPOT_WAIT_MS = 60000;
     const SEEK_STEP_SEC = 10;
-    const VOL_POPOVER_FADE_MS = 1600;
+    const VOL_POPOVER_FADE_MS = 2200;
     const SEEK_RADIUS_SEC = 30;
     const SEEK_WINDOW_MAX = 90;
     const SEEK_RADIUS_WIDE_SEC = 60;
@@ -978,6 +1017,7 @@
     let playbackMuted = false;
     let playbackVolume = 1;
     let volHideTimer = null;
+    let volInteracting = false;
     const fpInflight = new Map();
 
     function fmtTime(sec) {
@@ -1528,7 +1568,8 @@
       const slider = $('volSlider');
       if (pctEl) pctEl.textContent = labels.pct;
       if (dbEl) dbEl.textContent = labels.db;
-      if (slider && document.activeElement !== slider) {
+      // Never rewrite the slider value while the user is dragging — that drops the touch.
+      if (slider && !volInteracting) {
         slider.value = String(Math.round(playbackVolume * 100));
       }
     }
@@ -1537,10 +1578,15 @@
       const pop = $('volPopover');
       const btn = $('btnVol');
       if (!pop) return;
+      if (volInteracting) return;
       if (volHideTimer) { clearTimeout(volHideTimer); volHideTimer = null; }
       if (fade && !pop.hidden) {
         pop.classList.add('fading');
         setTimeout(() => {
+          if (volInteracting) {
+            pop.classList.remove('fading');
+            return;
+          }
           pop.hidden = true;
           pop.classList.remove('fading');
         }, 450);
@@ -1555,6 +1601,7 @@
     }
 
     function scheduleVolPopoverHide() {
+      if (volInteracting) return;
       if (volHideTimer) clearTimeout(volHideTimer);
       volHideTimer = setTimeout(() => hideVolPopover(true), VOL_POPOVER_FADE_MS);
     }
@@ -1570,12 +1617,12 @@
         btn.setAttribute('aria-pressed', 'true');
       }
       updateVolPopoverLabels();
-      scheduleVolPopoverHide();
+      // Do not start the fade timer until the user finishes adjusting.
     }
 
     function toggleVolPopover() {
       const pop = $('volPopover');
-      if (!pop || pop.hidden) showVolPopover();
+      if (!pop || pop.hidden || pop.classList.contains('fading')) showVolPopover();
       else hideVolPopover(true);
     }
 
@@ -1593,10 +1640,7 @@
       playbackMuted = !playbackMuted;
       applyPlaybackVolume();
       updatePlaybackUi();
-      if (!$('volPopover').hidden) {
-        updateVolPopoverLabels();
-        scheduleVolPopoverHide();
-      }
+      if ($('volPopover') && !$('volPopover').hidden) updateVolPopoverLabels();
     }
 
     function setPlaybackVolumePct(pct) {
@@ -1604,17 +1648,26 @@
       if (playbackVolume > 0 && playbackMuted) playbackMuted = false;
       applyPlaybackVolume();
       updateVolPopoverLabels();
-      updatePlaybackUi();
-      scheduleVolPopoverHide();
+      const muteBtn = $('btnMute');
+      if (muteBtn) {
+        muteBtn.textContent = playbackMuted ? 'Unmute' : 'Mute';
+        muteBtn.classList.toggle('muted', playbackMuted);
+        muteBtn.setAttribute('aria-pressed', playbackMuted ? 'true' : 'false');
+      }
+    }
+
+    function isPlaybackTransportVisible() {
+      return state.mode === 'backing' && !!backupAudio && !backupAudio.paused;
     }
 
     function updatePlaybackUi() {
       const row = $('playbackRow');
       const muteBtn = $('btnMute');
       if (!row) return;
-      const show = state.mode === 'backing';
+      const show = isPlaybackTransportVisible();
       row.hidden = !show;
       if (!show) {
+        volInteracting = false;
         hideVolPopover(false);
         return;
       }
@@ -1623,14 +1676,14 @@
         muteBtn.classList.toggle('muted', playbackMuted);
         muteBtn.setAttribute('aria-pressed', playbackMuted ? 'true' : 'false');
       }
-      updateVolPopoverLabels();
+      if (!volInteracting) updateVolPopoverLabels();
     }
 
     function updateTrailUi() {
       const row = $('trailRow');
       const val = $('trailVal');
       if (!row || !val) return;
-      // Trail controls while tracking; playback transport replaces them during backup play.
+      // Trail while tracking; seek/mute/vol only while backup audio is playing.
       const showTrail = showsTrailRow() && state.mode !== 'backing';
       row.hidden = !showTrail;
       if (showTrail) {
@@ -4513,21 +4566,46 @@
     $('btnSeekFwd').addEventListener('click', () => seekPlayback(SEEK_STEP_SEC));
     $('btnMute').addEventListener('click', () => togglePlaybackMute());
     $('btnVol').addEventListener('click', e => {
+      e.preventDefault();
       e.stopPropagation();
       toggleVolPopover();
     });
-    $('volSlider').addEventListener('input', e => {
+    const volSlider = $('volSlider');
+    const volPopover = $('volPopover');
+    function beginVolInteract(e) {
+      if (e) e.stopPropagation();
+      volInteracting = true;
+      if (volHideTimer) { clearTimeout(volHideTimer); volHideTimer = null; }
+      const pop = $('volPopover');
+      if (pop) pop.classList.remove('fading');
+    }
+    function endVolInteract() {
+      volInteracting = false;
+      scheduleVolPopoverHide();
+    }
+    volSlider.addEventListener('pointerdown', beginVolInteract);
+    volSlider.addEventListener('pointerup', endVolInteract);
+    volSlider.addEventListener('pointercancel', endVolInteract);
+    volSlider.addEventListener('touchstart', beginVolInteract, { passive: true });
+    volSlider.addEventListener('touchend', endVolInteract);
+    volSlider.addEventListener('input', e => {
+      volInteracting = true;
+      if (volHideTimer) { clearTimeout(volHideTimer); volHideTimer = null; }
       setPlaybackVolumePct(+e.target.value);
     });
-    $('volSlider').addEventListener('pointerdown', () => {
-      if (volHideTimer) clearTimeout(volHideTimer);
+    volSlider.addEventListener('change', () => {
+      volInteracting = false;
+      scheduleVolPopoverHide();
     });
-    $('volSlider').addEventListener('pointerup', () => scheduleVolPopoverHide());
-    document.addEventListener('click', e => {
+    if (volPopover) {
+      volPopover.addEventListener('pointerdown', e => e.stopPropagation());
+      volPopover.addEventListener('click', e => e.stopPropagation());
+    }
+    document.addEventListener('pointerdown', e => {
       const pop = $('volPopover');
-      const row = $('playbackRow');
-      if (!pop || pop.hidden || !row) return;
-      if (row.contains(e.target)) return;
+      const btn = $('btnVol');
+      if (!pop || pop.hidden || volInteracting) return;
+      if (pop.contains(e.target) || (btn && btn.contains(e.target))) return;
       hideVolPopover(true);
     });
 
