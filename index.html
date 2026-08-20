@@ -387,7 +387,7 @@
     }
     .settings summary::-webkit-details-marker { display: none; }
     .settings summary .summary-label { flex: 1; }
-    .settings.locked summary { cursor: default; }
+    .settings.locked summary { cursor: pointer; }
     .btn-lock {
       min-height: 36px; min-width: 36px; padding: 0;
       border-radius: 10px; border: 1px solid var(--line);
@@ -739,7 +739,7 @@
   <details class="settings card" id="settingsPanel">
     <summary>
       <span class="summary-label">Settings</span>
-      <button type="button" class="btn-lock" id="btnSettingsLock" title="Pin settings open" aria-pressed="false" aria-label="Pin settings open">🔓</button>
+      <button type="button" class="btn-lock" id="btnSettingsLock" title="Lock settings controls" aria-pressed="false" aria-label="Lock settings controls">🔓</button>
     </summary>
     <div class="setting-row">
       <label for="bufferDelay">Buffer delay (backup trails the amp)</label>
@@ -804,7 +804,7 @@
     <button type="button" class="btn" id="btnForgetFingerprints" style="width:100%;margin-top:8px">Clear stored fingerprints</button>
   </details>
 
-  <p class="ver mono" id="appVer">v1.6.4 · 2026-08-20 22:36</p>
+  <p class="ver mono" id="appVer">v1.6.4 · 2026-08-20 22:45</p>
   <p class="ver-note" id="appVerNote" hidden>Lock cleanup · playback transport only while playing · volume slider stays open while adjusting</p>
 
   <div class="bottom-bar">
@@ -824,7 +824,7 @@
   <script>
     const $ = id => document.getElementById(id);
     const APP_VER = '1.6.4';
-    const APP_BUILD = '2026-08-20 22:36';
+    const APP_BUILD = '2026-08-20 22:45';
 
     const ENVELOPE_RATE = 20;
     const TRAIL_STEP_MS = 1000;
@@ -2548,12 +2548,12 @@
       const btn = $('btnSettingsLock');
       if (!panel || !btn) return;
       panel.classList.toggle('locked', settingsLocked);
-      if (settingsLocked) panel.open = true;
+      // Lock only freezes controls — panel can still expand/collapse.
       btn.classList.toggle('on', settingsLocked);
       btn.textContent = settingsLocked ? '🔒' : '🔓';
-      btn.title = settingsLocked ? 'Unlock settings' : 'Lock settings';
+      btn.title = settingsLocked ? 'Unlock settings controls' : 'Lock settings controls';
       btn.setAttribute('aria-pressed', settingsLocked ? 'true' : 'false');
-      // Disable/enable all inputs and buttons inside settings (except the lock button itself).
+      btn.setAttribute('aria-label', btn.title);
       panel.querySelectorAll('input, select, button:not(#btnSettingsLock)').forEach(el => {
         el.disabled = settingsLocked;
       });
@@ -4761,10 +4761,6 @@
       settingsLocked = !settingsLocked;
       applySettingsLockUi();
       scheduleSaveSettings();
-    });
-
-    $('settingsPanel').addEventListener('toggle', () => {
-      if (settingsLocked) $('settingsPanel').open = true;
     });
 
     $('bufferDelay').addEventListener('input', e => {
