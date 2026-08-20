@@ -1,0 +1,23 @@
+name: Notify hub (camp mother)
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'hub.json'
+
+jobs:
+  notify-hub:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch hub-sync to camp mother
+        env:
+          GH_TOKEN: ${{ secrets.HUB_SYNC_TOKEN || secrets.HUB_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "No HUB_SYNC_TOKEN or HUB_TOKEN secret — camp mother polls hourly. Skipping dispatch."
+            exit 0
+          fi
+          gh api -X POST repos/azzabazza11/azzabazza11.github.io/dispatches \
+            -f event_type=hub-sync
+          echo "Dispatched hub-sync to azzabazza11/azzabazza11.github.io"

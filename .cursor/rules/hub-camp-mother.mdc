@@ -1,0 +1,31 @@
+---
+description: Keep APP_VER and hub.json.version locked for Aaron's Apps camp mother
+alwaysApply: true
+---
+
+# Hub / camp mother version lock
+
+Aaron's Apps **camp mother** reads this repo's root `hub.json` for the hub card badge. Do not edit `azzabazza11.github.io` catalog or fallbacks from this app repo.
+
+## When shipping any user-visible fix or feature
+
+In the **same commit**:
+
+1. Bump `APP_VER` in `index.html` (and `docs/index.html` if mirrored).
+2. Bump `service-worker.js` / `docs/service-worker.js` `CACHE` to `back-me-up-vX.Y.Z` matching `APP_VER`.
+3. Set `hub.json` `version` to the **identical** string as `APP_VER` (no `v` prefix).
+4. Prepend `hub.json` `changelog[]` entry: `{ "version", "date": "YYYY-MM-DD", "notes" }` (one line).
+5. Update `README.md` Version line if present.
+6. Refresh `APP_BUILD` stamp (via `scripts/stamp-build.sh` or pre-commit hook).
+
+Bump rules: **patch** = bugfix, **minor** = feature, **major** = breaking.
+
+## Never
+
+- Change only `APP_VER` or only `hub.json.version`.
+- Sed / PR / push into `azzabazza11/azzabazza11.github.io` apps catalog from this repo.
+- Invent a hub badge version that is not `hub.json.version`.
+
+## Notify
+
+Pushing `hub.json` to `main` runs `.github/workflows/notify-hub.yml`, which dispatches `hub-sync` to the hub repo when `HUB_SYNC_TOKEN` or `HUB_TOKEN` is set. Otherwise camp mother polls hourly — still keep `hub.json` correct.
