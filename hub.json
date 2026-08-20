@@ -1,7 +1,7 @@
 {
   "id": "audio-backup-helper",
   "title": "Back Me Up",
-  "version": "1.2.1",
+  "version": "1.6.4",
   "category": "Tools",
   "desc": "Arm a backup audio track, listen via mic, and take over if the main amplifier cuts out. Load a folder of lesson audio on your phone.",
   "accent": "#123c32",
@@ -23,6 +23,11 @@
     "phone"
   ],
   "changelog": [
+    {
+      "version": "1.6.4",
+      "date": "2026-08-20",
+      "notes": "More reliable lock pipeline; Play track and Reset session; backing-mode seek/mute/volume."
+    },
     {
       "version": "1.2.1",
       "date": "2026-08-17",
