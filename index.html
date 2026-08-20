@@ -230,6 +230,71 @@
       min-width: 4.5em; text-align: center;
       font-size: 1.05rem; font-weight: 600; color: var(--ink);
     }
+    .playback-row {
+      position: relative;
+      display: flex; align-items: center; justify-content: center; gap: 8px;
+      margin-top: 12px; padding: 10px 12px;
+      background: var(--bg); border: 1px solid var(--line);
+      border-radius: 14px;
+    }
+    .playback-btn {
+      min-width: 52px; min-height: 44px; padding: 0 10px;
+      border-radius: 12px; border: 1px solid var(--line);
+      background: var(--paper); font-size: 0.82rem; font-weight: 600;
+      color: var(--accent); touch-action: manipulation; user-select: none;
+    }
+    .playback-btn:active { background: var(--bg); }
+    .playback-btn.on {
+      background: var(--accent); color: #fff; border-color: var(--accent);
+    }
+    .playback-btn.muted {
+      background: var(--bad); color: #fff; border-color: var(--bad);
+    }
+    .vol-popover {
+      position: absolute;
+      left: 50%;
+      bottom: calc(100% + 8px);
+      transform: translateX(-50%);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 10px;
+      padding: 14px 12px 12px;
+      background: var(--paper);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      box-shadow: 0 8px 28px rgba(18, 40, 32, 0.18);
+      z-index: 40;
+      opacity: 1;
+      transition: opacity 0.45s ease;
+      pointer-events: auto;
+    }
+    .vol-popover.fading { opacity: 0; pointer-events: none; }
+    .vol-popover[hidden] { display: none !important; }
+    .vol-slider {
+      -webkit-appearance: slider-vertical;
+      appearance: slider-vertical;
+      writing-mode: vertical-lr;
+      direction: rtl;
+      width: 36px;
+      height: 160px;
+      padding: 0;
+      margin: 0;
+      accent-color: var(--accent);
+      touch-action: none;
+    }
+    .vol-label {
+      font-size: 0.92rem;
+      font-weight: 700;
+      color: var(--ink);
+      text-align: center;
+      min-width: 5.5em;
+    }
+    .vol-sub {
+      font-size: 0.72rem;
+      color: var(--muted);
+      margin-top: -6px;
+    }
     .bottom-hint {
       margin: 0 0 8px; text-align: center;
       font-size: 0.78rem; color: var(--muted);
@@ -585,6 +650,17 @@
       <span class="mono trail-val" id="trailVal">2 s</span>
       <button type="button" class="trail-btn" id="btnTrailUp" aria-label="Increase trail time">+</button>
     </div>
+    <div class="playback-row" id="playbackRow" hidden>
+      <button type="button" class="playback-btn" id="btnSeekBack" aria-label="Seek back 10 seconds">−10s</button>
+      <button type="button" class="playback-btn" id="btnMute" aria-label="Mute" aria-pressed="false">Mute</button>
+      <button type="button" class="playback-btn" id="btnVol" aria-label="Volume" aria-pressed="false">Vol</button>
+      <button type="button" class="playback-btn" id="btnSeekFwd" aria-label="Seek forward 10 seconds">+10s</button>
+      <div class="vol-popover" id="volPopover" hidden>
+        <input type="range" class="vol-slider" id="volSlider" min="0" max="100" step="1" value="100" aria-label="Volume" />
+        <span class="mono vol-label" id="volLabel">100%</span>
+        <span class="mono vol-sub" id="volDb">0.0 dB</span>
+      </div>
+    </div>
     <div class="mic-meter" id="micMeterWrap" hidden></div>
     <p class="sync-line" id="syncLine" hidden></p>
     <div class="fp-viz" id="fpViz" hidden>
@@ -680,13 +756,17 @@
     </div>
     <p class="hint cal-hint">Debug tuning for the confidence meter: raise these when quiet gaps and patch timing line up clearly even if raw loudness-sensitive hashes score low.</p>
     <button type="button" class="btn" id="btnBlurFromFile" style="width:100%;margin-top:8px">Set blur from this file’s pauses</button>
+    <button type="button" class="btn primary" id="btnPlayTrack" style="width:100%;margin-top:12px">Play track</button>
+    <p class="hint cal-hint">Plays the selected file from the current lock position (minus trail), or from the start if not locked. Same as Take Over, always available here so it isn’t pressed by accident.</p>
+    <button type="button" class="btn" id="btnResetSession" style="width:100%;margin-top:8px">Reset session</button>
+    <p class="hint cal-hint">Zeros amp/backup counters, clears the event log, and returns to idle so you can start fresh. Does not clear stored fingerprints.</p>
     <button type="button" class="btn" id="btnForgetLibrary" style="width:100%;margin-top:8px">Forget saved folder</button>
     <p class="hint cal-hint">Fingerprints stay until you clear them. Forgetting the folder does not delete stored fingerprints.</p>
     <button type="button" class="btn" id="btnForgetFingerprints" style="width:100%;margin-top:8px">Clear stored fingerprints</button>
   </details>
 
-  <p class="ver mono" id="appVer">v1.6.3 · 2026-08-19 23:30</p>
-  <p class="ver-note" id="appVerNote" hidden>Burst-bounded clips (1–30 s, natural word boundaries, 0.6 s pre-roll) · no fixed-length recording · clip length scales thresholds</p>
+  <p class="ver mono" id="appVer">v1.6.4</p>
+  <p class="ver-note" id="appVerNote" hidden>Lock cleanup: clips need fileBuffer only · soft gaps · near-miss keeps streak · forward-wide search · playback transport in settings</p>
 
   <div class="bottom-bar">
     <p class="bottom-hint" id="mainBtnHint">Press to start tracking · Take Over when ready</p>
@@ -704,7 +784,7 @@
 
   <script>
     const $ = id => document.getElementById(id);
-    const APP_VER = '1.5.6';
+    const APP_VER = '1.6.4';
 
     const ENVELOPE_RATE = 20;
     const TRAIL_STEP_MS = 1000;
@@ -755,6 +835,8 @@
     const FP_BIN_Q = 3;
     const FP_HOP_SEC = FP_HOP / FP_SR;
     const SPOT_WAIT_MS = 60000;
+    const SEEK_STEP_SEC = 10;
+    const VOL_POPOVER_FADE_MS = 1600;
     const SEEK_RADIUS_SEC = 30;
     const SEEK_WINDOW_MAX = 90;
     const SEEK_RADIUS_WIDE_SEC = 60;
@@ -893,6 +975,9 @@
     let manualWinDur = 0;
     let manualWinWide = false;
     let manualMissStreak = 0;
+    let playbackMuted = false;
+    let playbackVolume = 1;
+    let volHideTimer = null;
     const fpInflight = new Map();
 
     function fmtTime(sec) {
@@ -1402,7 +1487,7 @@
     }
 
     function isClipMatchMode() {
-      return state.mode === 'primed' || state.mode === 'manual' || state.mode === 'seeking';
+      return state.mode === 'manual' || state.mode === 'seeking' || state.mode === 'cutout';
     }
 
     function showsTrailRow() {
@@ -1423,15 +1508,136 @@
       return Math.max(0, manualBaseSec + (Date.now() - manualStartedAt) / 1000);
     }
 
+    function fmtVolumeLabel(vol01) {
+      const pct = Math.round(Math.max(0, Math.min(1, vol01)) * 100);
+      const db = vol01 <= 0.0001 ? -Infinity : 20 * Math.log10(vol01);
+      const dbTxt = !isFinite(db) ? '−∞ dB' : (db >= 0 ? '+' : '') + db.toFixed(1) + ' dB';
+      return { pct: pct + '%', db: dbTxt };
+    }
+
+    function applyPlaybackVolume() {
+      if (!backupAudio) return;
+      backupAudio.muted = !!playbackMuted;
+      backupAudio.volume = playbackMuted ? 0 : Math.max(0, Math.min(1, playbackVolume));
+    }
+
+    function updateVolPopoverLabels() {
+      const labels = fmtVolumeLabel(playbackMuted ? 0 : playbackVolume);
+      const pctEl = $('volLabel');
+      const dbEl = $('volDb');
+      const slider = $('volSlider');
+      if (pctEl) pctEl.textContent = labels.pct;
+      if (dbEl) dbEl.textContent = labels.db;
+      if (slider && document.activeElement !== slider) {
+        slider.value = String(Math.round(playbackVolume * 100));
+      }
+    }
+
+    function hideVolPopover(fade) {
+      const pop = $('volPopover');
+      const btn = $('btnVol');
+      if (!pop) return;
+      if (volHideTimer) { clearTimeout(volHideTimer); volHideTimer = null; }
+      if (fade && !pop.hidden) {
+        pop.classList.add('fading');
+        setTimeout(() => {
+          pop.hidden = true;
+          pop.classList.remove('fading');
+        }, 450);
+      } else {
+        pop.hidden = true;
+        pop.classList.remove('fading');
+      }
+      if (btn) {
+        btn.classList.remove('on');
+        btn.setAttribute('aria-pressed', 'false');
+      }
+    }
+
+    function scheduleVolPopoverHide() {
+      if (volHideTimer) clearTimeout(volHideTimer);
+      volHideTimer = setTimeout(() => hideVolPopover(true), VOL_POPOVER_FADE_MS);
+    }
+
+    function showVolPopover() {
+      const pop = $('volPopover');
+      const btn = $('btnVol');
+      if (!pop) return;
+      pop.hidden = false;
+      pop.classList.remove('fading');
+      if (btn) {
+        btn.classList.add('on');
+        btn.setAttribute('aria-pressed', 'true');
+      }
+      updateVolPopoverLabels();
+      scheduleVolPopoverHide();
+    }
+
+    function toggleVolPopover() {
+      const pop = $('volPopover');
+      if (!pop || pop.hidden) showVolPopover();
+      else hideVolPopover(true);
+    }
+
+    function seekPlayback(deltaSec) {
+      if (!backupAudio || state.mode !== 'backing') return;
+      const dur = isFinite(backupAudio.duration) ? backupAudio.duration : (fileDuration || 0);
+      const next = Math.max(0, Math.min(dur || 1e9, backupAudio.currentTime + deltaSec));
+      backupAudio.currentTime = next;
+      trackedPosition = next;
+      updateProgressDisplay();
+    }
+
+    function togglePlaybackMute() {
+      if (state.mode !== 'backing') return;
+      playbackMuted = !playbackMuted;
+      applyPlaybackVolume();
+      updatePlaybackUi();
+      if (!$('volPopover').hidden) {
+        updateVolPopoverLabels();
+        scheduleVolPopoverHide();
+      }
+    }
+
+    function setPlaybackVolumePct(pct) {
+      playbackVolume = Math.max(0, Math.min(1, pct / 100));
+      if (playbackVolume > 0 && playbackMuted) playbackMuted = false;
+      applyPlaybackVolume();
+      updateVolPopoverLabels();
+      updatePlaybackUi();
+      scheduleVolPopoverHide();
+    }
+
+    function updatePlaybackUi() {
+      const row = $('playbackRow');
+      const muteBtn = $('btnMute');
+      if (!row) return;
+      const show = state.mode === 'backing';
+      row.hidden = !show;
+      if (!show) {
+        hideVolPopover(false);
+        return;
+      }
+      if (muteBtn) {
+        muteBtn.textContent = playbackMuted ? 'Unmute' : 'Mute';
+        muteBtn.classList.toggle('muted', playbackMuted);
+        muteBtn.setAttribute('aria-pressed', playbackMuted ? 'true' : 'false');
+      }
+      updateVolPopoverLabels();
+    }
+
     function updateTrailUi() {
       const row = $('trailRow');
       const val = $('trailVal');
       if (!row || !val) return;
-      const show = showsTrailRow();
-      row.hidden = !show;
-      if (!show) return;
-      const ms = effectiveTrailMs();
-      val.textContent = fmtTrailMs(ms);
+      // Trail controls while tracking; playback transport replaces them during backup play.
+      const showTrail = showsTrailRow() && state.mode !== 'backing';
+      row.hidden = !showTrail;
+      if (showTrail) {
+        const ms = effectiveTrailMs();
+        val.textContent = fmtTrailMs(ms);
+      }
+      updatePlaybackUi();
     }
 
     function syncBufferDelayUi() {
@@ -2210,34 +2416,42 @@
       const score = result.score;
       const coverage = result.coverage || 0;
       const found = result.found || 0;
-      const reasons = [];
+      const hard = [];
+      const soft = [];
       if (score < state.settings.matchThreshold) {
-        reasons.push('score ' + score.toFixed(2) + ' < ' + state.settings.matchThreshold.toFixed(2) +
+        hard.push('score ' + score.toFixed(2) + ' < ' + state.settings.matchThreshold.toFixed(2) +
           ' (need ~' + (state.settings.matchThreshold * needScore).toFixed(0) + ' rare hashes)');
       }
       if (result.hits < needHits) {
-        reasons.push('idf ' + result.hits.toFixed(0) + ' < ' + needHits);
+        hard.push('idf ' + result.hits.toFixed(0) + ' < ' + needHits);
       }
       if ((result.contrast || 0) < MIN_CLIP_CONTRAST) {
-        reasons.push('contrast ×' + (result.contrast || 0).toFixed(1) + ' < ' + MIN_CLIP_CONTRAST);
+        hard.push('contrast ×' + (result.contrast || 0).toFixed(1) + ' < ' + MIN_CLIP_CONTRAST);
       }
       if (found < needFound) {
-        reasons.push('only ' + found + ' clip hashes exist in the file (need ≥ ' + needFound + ')');
+        hard.push('only ' + found + ' clip hashes exist in the file (need ≥ ' + needFound + ')');
       }
       // Allow lower coverage when score and idf are both very high — sparse-hash tracks.
       const coverageFloor = (score >= 0.95 && result.hits >= needHits * 1.5)
         ? MIN_CLIP_COVERAGE * 0.6
         : MIN_CLIP_COVERAGE;
       if (coverage < coverageFloor) {
-        reasons.push('cover ' + Math.round(coverage * 100) + '% of matched hashes < ' +
+        hard.push('cover ' + Math.round(coverage * 100) + '% of matched hashes < ' +
           Math.round(coverageFloor * 100) + '%');
       }
+      // Gaps are soft: room noise in pauses lowers confidence but does not veto a hit.
       if (result.gapUsable && result.gapScore < MIN_GAP_SCORE) {
-        reasons.push('gaps ' + Math.round(result.gapScore * 100) + '% quiet in file pauses < ' +
-          Math.round(MIN_GAP_SCORE * 100) + '% (blur ' + Math.round(result.gapBlurMs || 0) + ' ms)');
+        soft.push('gaps ' + Math.round(result.gapScore * 100) + '% quiet in file pauses < ' +
+          Math.round(MIN_GAP_SCORE * 100) + '% (soft)');
       }
-      if ((result.hashes || 0) < 8) reasons.push('too few peaks in clip');
-      return { ok: reasons.length === 0, reasons, needHits, needScore, coverage };
+      if ((result.hashes || 0) < 8) hard.push('too few peaks in clip');
+      const ok = hard.length === 0;
+      // Near-miss: close on hard gates (score almost there, or only coverage short).
+      const nearMiss = !ok && score >= state.settings.matchThreshold * 0.85 &&
+        hard.length <= 2 &&
+        !(result.hashes < 8);
+      const reasons = soft.length ? hard.concat(soft) : hard;
+      return { ok, nearMiss, reasons, needHits, needScore, coverage, soft };
     }
 
     function applyVizUi() {
@@ -2440,7 +2654,7 @@
       return 'Hit needs score ≥ ' + state.settings.matchThreshold.toFixed(2) +
         ' (~' + scoreHits + ' rare hashes) · ≥ ' + needHits + ' idf · ×' + MIN_CLIP_CONTRAST +
         ' contrast · ' + Math.round(MIN_CLIP_COVERAGE * 100) + '% of hashes that exist in the file · ' +
-        'file pauses ≥ ' + Math.round(MIN_GAP_SCORE * 100) + '% quiet on mic (blur ' +
+        'file pauses soft-checked (≥ ' + Math.round(MIN_GAP_SCORE * 100) + '% quiet preferred, blur ' +
         Math.round(state.settings.patternBlurMs) + ' ms) · ' +
         MIN_LOCK_CLIPS + ' clips in a row that follow the file clock · ' +
         (state.settings.confirmHoldMs / 1000).toFixed(1) + ' s hold';
@@ -2802,8 +3016,8 @@
       if (!isClipMatchMode() || state.analysing || clipCollecting || clipBusy) return;
       // After lock, only spot checks collect clips — regular matching is suppressed.
       if (state.mode === 'manual' && trackingLocked) return;
-      if ((state.mode === 'primed' || state.mode === 'manual') && !templateIndex) return;
-      if (state.mode === 'seeking' && !fileBuffer) return;
+      // Live matching uses tiled search on the full decoded buffer — not the 30 s templateIndex.
+      if (!fileBuffer) return;
       if (rms <= state.settings.silenceThreshold) return;
       beginClipCollect();
       lastClipStatus = 'recording';
@@ -2935,16 +3149,30 @@
       } else {
         lastClipStatus = 'miss';
         lastClipFail = judged.reasons.join(' · ');
-        hitStreak = 0;
-        lastHitOffset = 0;
-        lastHitPerf = 0;
+        const nearPos = hitStreak > 0 && lastHitOffset &&
+          Math.abs(result.offsetSec - lastHitOffset) < 10;
+        const nearMiss = judged.nearMiss && nearPos;
+        if (nearMiss) {
+          // Soft miss: keep some streak so one weak clip does not wipe a good lock path.
+          hitStreak = Math.max(0, hitStreak - 1);
+          pushClipLog({
+            kind: 'miss',
+            at: Date.now(),
+            line: (state.mode === 'seeking' ? 'SEEK NEAR ' : state.mode === 'manual' ? 'MAN NEAR ' : 'NEAR ') +
+              base + ' · ' + lastClipFail + ' · streak held ' + hitStreak + '/' + MIN_LOCK_CLIPS
+          });
+        } else {
+          hitStreak = 0;
+          lastHitOffset = 0;
+          lastHitPerf = 0;
+          pushClipLog({
+            kind: 'miss',
+            at: Date.now(),
+            line: (state.mode === 'seeking' ? 'SEEK MISS ' : state.mode === 'manual' ? 'MAN MISS ' : 'MISS ') +
+              base + ' · ' + lastClipFail
+          });
+        }
         if (state.mode === 'manual' && !trackingLocked) manualMissStreak += 1;
-        pushClipLog({
-          kind: 'miss',
-          at: Date.now(),
-          line: (state.mode === 'seeking' ? 'SEEK MISS ' : state.mode === 'manual' ? 'MAN MISS ' : 'MISS ') +
-            base + ' · ' + lastClipFail
-        });
         if (confirmStartedAt) {
           if (!confirmBadSince) confirmBadSince = now;
           if (now - confirmBadSince >= CONFIRM_GRACE_MS) resetConfirmHold();
@@ -2963,42 +3191,18 @@
       return { start: lo, dur: Math.max(8, hi - lo), center: nowEst };
     }
 
-    function refreshSeekTemplate() {
-      if (!fileBuffer) return null;
-      const win = seekWindow();
-      if (seekTemplate && Math.abs(win.start - seekWinStart) < 2 && Math.abs(win.dur - seekWinDur) < 4) {
-        return seekTemplate;
-      }
-      seekTemplate = buildTemplateIndex(fileBuffer, win.dur, win.start);
-      seekWinStart = win.start;
-      seekWinDur = win.dur;
-      return seekTemplate;
-    }
-
     function manualMatchWindow() {
       const center = roomPosition();
-      // Widen the search after repeated misses while the mic is clearly hearing something.
+      // Widen after repeated misses while the mic is clearly hearing something.
+      // Bias forward — amp is more likely ahead of the user clock than behind.
       const widen = manualMissStreak >= MANUAL_WIDE_MISS_THRESH && ambientRms > 0;
-      const radius = widen ? SEEK_RADIUS_WIDE_SEC : SEEK_RADIUS_SEC;
-      const lo = Math.max(0, center - radius);
-      const hiRaw = center + radius;
+      const bwd = widen ? 15 : SEEK_RADIUS_SEC;
+      const fwd = widen ? SEEK_RADIUS_WIDE_SEC : SEEK_RADIUS_SEC;
+      const lo = Math.max(0, center - bwd);
+      const hiRaw = center + fwd;
       const cap = fileDuration || hiRaw;
       const hi = Math.min(cap, lo + SEEK_WINDOW_MAX * 2, hiRaw);
       return { start: lo, dur: Math.max(8, hi - lo), center, wide: widen };
-    }
-
-    function refreshManualTemplate() {
-      if (!fileBuffer) return null;
-      const win = manualMatchWindow();
-      if (manualTemplate && Math.abs(win.start - manualWinStart) < 2 &&
-          Math.abs(win.dur - manualWinDur) < 4 && !!win.wide === !!manualWinWide) {
-        return manualTemplate;
-      }
-      manualTemplate = buildTemplateIndex(fileBuffer, win.dur, win.start);
-      manualWinStart = win.start;
-      manualWinDur = win.dur;
-      manualWinWide = win.wide;
-      return manualTemplate;
     }
 
     function applyManualMatch(samples, sampleRate, clipMs) {
@@ -3007,7 +3211,12 @@
       if (!result || result.score === 0) {
         lastClipStatus = 'miss';
         lastClipFail = 'no match in window';
-        pushClipLog({ kind: 'miss', at: Date.now(), line: 'MAN MISS no match in window' });
+        if (!trackingLocked) manualMissStreak += 1;
+        pushClipLog({
+          kind: 'miss',
+          at: Date.now(),
+          line: 'MAN MISS no match in window' + (win.wide ? ' · wide +' + Math.round(win.dur) + 's' : '')
+        });
         updateUI();
         return;
       }
@@ -4183,33 +4392,81 @@
       updateProgressDisplay();
     }
 
-    async function takeOver() {
-      if (!backupAudio) return;
+    async function startBackupPlayback(seekSec, logLine) {
+      const track = selectedTrack();
+      if (!track) return false;
+      ensureAudioCtx();
+      if (audioCtx && audioCtx.state === 'suspended') await audioCtx.resume();
+      if (!backupAudio) {
+        backupAudio = new Audio(track.url);
+        backupAudio.preload = 'auto';
+      }
       if (pendingPlayTimer) { clearTimeout(pendingPlayTimer); pendingPlayTimer = null; }
-      const seekSec = Math.max(0, roomPosition() - effectiveTrailMs() / 1000);
-      pushClipLog({
-        kind: 'lock',
-        at: Date.now(),
-        line: 'TAKE OVER amp@' + fmtTime(roomPosition()) +
-          ' · backup@' + fmtTime(seekSec) +
-          ' · trail ' + fmtTrailMs(effectiveTrailMs())
-      });
-      backupAudio.volume = 1;
-      backupAudio.currentTime = seekSec;
+      if (listenTimer) { clearInterval(listenTimer); listenTimer = null; }
+      stopClipCapture();
+      // Mute mic while local playback runs to avoid feedback into the speaker.
+      if (micStream) micStream.getTracks().forEach(t => { t.enabled = false; });
+      pushClipLog({ kind: 'lock', at: Date.now(), line: logLine });
+      applyPlaybackVolume();
+      backupAudio.currentTime = Math.max(0, seekSec);
       await backupAudio.play();
       setMode('backing');
-
-      if (listenTimer) { clearInterval(listenTimer); listenTimer = null; }
-
-      backupAudio.onended = () => {
-        disarm(true);
-      };
-
+      updatePlaybackUi();
+      backupAudio.onended = () => { disarm(true); };
       const progressInterval = setInterval(() => {
         if (state.mode !== 'backing') { clearInterval(progressInterval); return; }
         updateProgressDisplay();
         if (showDebug || showViz) renderFingerprintViz();
       }, 200);
+      updateUI();
+      return true;
+    }
+
+    async function takeOver() {
+      if (!backupAudio && !selectedTrack()) return;
+      const seekSec = Math.max(0, roomPosition() - effectiveTrailMs() / 1000);
+      await startBackupPlayback(
+        seekSec,
+        'TAKE OVER amp@' + fmtTime(roomPosition()) +
+          ' · backup@' + fmtTime(seekSec) +
+          ' · trail ' + fmtTrailMs(effectiveTrailMs())
+      );
+    }
+
+    async function playTrackFromSettings() {
+      const track = selectedTrack();
+      if (!track) {
+        alert('Select a track first.');
+        return;
+      }
+      let seekSec = 0;
+      let where = 'from start (no lock)';
+      if (trackingLocked) {
+        seekSec = Math.max(0, roomPosition() - effectiveTrailMs() / 1000);
+        where = 'lock amp@' + fmtTime(roomPosition()) +
+          ' · trail ' + fmtTrailMs(effectiveTrailMs());
+      }
+      await startBackupPlayback(
+        seekSec,
+        'PLAY TRACK backup@' + fmtTime(seekSec) + ' · ' + where
+      );
+    }
+
+    async function resetSessionFromSettings() {
+      await disarm(true);
+      clipLog = [];
+      lockReason = '';
+      lastClipStatus = 'waiting';
+      lastClipFail = '';
+      lastSpotStatus = '';
+      lastMatchScore = 0;
+      hitStreak = 0;
+      manualMissStreak = 0;
+      confirmHeldMs = 0;
+      trackedPosition = 0;
+      updateProgressDisplay();
+      updateUI();
+      renderTriggerLog();
     }
 
     function dismissCutout() {
@@ -4237,6 +4494,8 @@
     $('folderInput').addEventListener('change', handleFolderPick);
     $('btnForgetLibrary').addEventListener('click', () => forgetLibrary());
     $('btnForgetFingerprints').addEventListener('click', () => forgetFingerprints());
+    $('btnPlayTrack').addEventListener('click', () => playTrackFromSettings());
+    $('btnResetSession').addEventListener('click', () => resetSessionFromSettings());
     $('btnCopyLog').addEventListener('click', () => copyDiagnostics());
     $('btnShareLog').addEventListener('click', () => shareDiagnostics());
 
@@ -4249,6 +4508,28 @@
 
     bindTrailHold($('btnTrailDown'), -TRAIL_STEP_MS, -TRAIL_HOLD_STEP_MS);
     bindTrailHold($('btnTrailUp'), TRAIL_STEP_MS, TRAIL_HOLD_STEP_MS);
+
+    $('btnSeekBack').addEventListener('click', () => seekPlayback(-SEEK_STEP_SEC));
+    $('btnSeekFwd').addEventListener('click', () => seekPlayback(SEEK_STEP_SEC));
+    $('btnMute').addEventListener('click', () => togglePlaybackMute());
+    $('btnVol').addEventListener('click', e => {
+      e.stopPropagation();
+      toggleVolPopover();
+    });
+    $('volSlider').addEventListener('input', e => {
+      setPlaybackVolumePct(+e.target.value);
+    });
+    $('volSlider').addEventListener('pointerdown', () => {
+      if (volHideTimer) clearTimeout(volHideTimer);
+    });
+    $('volSlider').addEventListener('pointerup', () => scheduleVolPopoverHide());
+    document.addEventListener('click', e => {
+      const pop = $('volPopover');
+      const row = $('playbackRow');
+      if (!pop || pop.hidden || !row) return;
+      if (row.contains(e.target)) return;
+      hideVolPopover(true);
+    });
 
     $('btnTakeOver').addEventListener('click', takeOver);
     $('btnDismissCutout').addEventListener('click', dismissCutout);
