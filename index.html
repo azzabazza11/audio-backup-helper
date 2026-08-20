@@ -992,6 +992,7 @@
     let hasAlign = false;
     let clipEnv = null;
     let clipEnvFileAt = 0;
+    let liveClipEnv = [];
     let micEnvT = [];
     let micEnvV = [];
     let spotMode = false;
@@ -2987,9 +2988,8 @@
       prerollHead = 0;
 
       captureNode.onaudioprocess = ev => {
-        const activeMode = state.mode === 'primed' || state.mode === 'manual' ||
-          state.mode === 'armed' || state.mode === 'seeking';
-        if (!activeMode) return;
+        // Must include cutout — otherwise re-lock clips never collect samples.
+        if (!isClipMatchMode() && state.mode !== 'armed') return;
 
         const data = ev.inputBuffer.getChannelData(0);
 
@@ -3010,6 +3010,10 @@
         chunkRms = Math.sqrt(chunkRms / data.length);
         const gate = state.settings.silenceThreshold;
         const nowMs = Date.now();
+
+        // Live Heard envelope — one bin per audio chunk while recording.
+        liveClipEnv.push(chunkRms);
+        if (liveClipEnv.length > ENVELOPE_RATE * CLIP_MAX_SEC) liveClipEnv.shift();
 
         if (chunkRms <= gate) {
           if (!burstSilenceSince) burstSilenceSince = nowMs;
@@ -3043,11 +3047,13 @@
       prerollBuf = null;
       prerollHead = 0;
       burstSilenceSince = 0;
+      liveClipEnv = [];
     }
 
     function beginClipCollect() {
       clipCollecting = true;
       burstSilenceSince = 0;
+      liveClipEnv = [];
       lastClipPerfStart = performance.now() / 1000;
       // Prepend pre-roll so we capture from burst start, not mid-word.
       if (prerollBuf && prerollHead > 0) {
@@ -3059,10 +3065,16 @@
         }
         clipParts = [pre];
         clipLength = filled;
+        // Seed live envelope from pre-roll RMS.
+        let sum = 0;
+        for (let i = 0; i < filled; i++) sum += pre[i] * pre[i];
+        liveClipEnv.push(Math.sqrt(sum / Math.max(1, filled)));
       } else {
         clipParts = [];
         clipLength = 0;
       }
+      // Provisional placement near the user clock so Heard is visible before match.
+      clipEnvFileAt = Math.max(0, roomPosition());
     }
 
     function beginClipIfNeeded(rms) {
@@ -3107,12 +3119,17 @@
       }
       clipParts = [];
       clipLength = 0;
+      liveClipEnv = [];
       const clipMs = collected / sr * 1000;
+      // Always show Heard immediately — even if matching later fails or finds nothing.
+      clipEnv = envelopeFromPcm(samples, sr);
+      clipEnvFileAt = Math.max(0, roomPosition());
       const wasSpot = spotMode;
       const wasCutoutVerify = cutoutVerifyMode;
       const spotStart = spotFileStart;
       spotMode = false;
       cutoutVerifyMode = false;
+      if (showDebug || showViz) renderFingerprintViz();
       setTimeout(() => {
         try {
           if (wasCutoutVerify) applyCutoutVerifyMatch(samples, sr, spotStart, clipMs);
@@ -3120,10 +3137,10 @@
           else if (state.mode === 'cutout') applyCutoutRelock(samples, sr, clipMs);
           else if (state.mode === 'seeking') applySeekMatch(samples, sr, clipMs);
           else if (state.mode === 'manual') applyManualMatch(samples, sr, clipMs);
-          else {
+          else if (fileBuffer) applyManualMatch(samples, sr, clipMs);
+          else if (templateIndex) {
             const result = matchClipToTemplate(samples, sr, templateIndex);
             result.offsetSec = templateOriginSec() + result.offsetSec;
-            clipEnv = envelopeFromPcm(samples, sr);
             clipEnvFileAt = result.offsetSec;
             const pattern = scoreSilencePattern(samples, sr, result.offsetSec);
             applyClipMatch(Object.assign(result, pattern), clipMs);
@@ -3716,6 +3733,22 @@
         };
       }
 
+      // Before lock, keep the view near the user clock so Heard clips stay on-screen.
+      if (state.mode === 'manual' || state.mode === 'cutout') {
+        const center = Math.max(0, roomPosition());
+        let start = center - windowSec * FP_SCROLL_LEAD;
+        if (start + windowSec > dur) start = Math.max(0, dur - windowSec);
+        start = Math.max(0, start);
+        return {
+          start,
+          windowSec,
+          scrolling: true,
+          playhead: center - start,
+          playheadBackup: null,
+          origin
+        };
+      }
+
       if (state.mode === 'seeking') {
         const win = seekWindow();
         const span = Math.max(windowSec, win.dur);
@@ -3831,30 +3864,76 @@
       const { w, h } = sizeFpCanvas(canvas);
       const ctx = canvas.getContext('2d');
       ctx.clearRect(0, 0, w, h);
-      ctx.fillStyle = color;
-      return { ctx, w, h, markerSec, windowSec };
+      return { ctx, w, h, markerSec, windowSec, color };
     }
 
-    function drawEnvelopeSeries(ctx, w, h, xs, ys, peak, windowSec) {
-      if (!xs.length || !windowSec) return;
-      const pad = 4 * (window.devicePixelRatio || 1);
+    function drawEnvelopeSeries(ctx, w, h, xs, ys, peak, windowSec, color) {
+      if (!xs.length || !windowSec || !peak) return;
+      const dpr = Math.min(2, window.devicePixelRatio || 1);
+      const pad = 4 * dpr;
       const usable = h - pad * 2;
-      ctx.beginPath();
-      ctx.moveTo(0, h - pad);
-      let started = false;
+      const pts = [];
       for (let i = 0; i < xs.length; i++) {
         const x = xs[i] / windowSec * w;
-        if (x < -2 || x > w + 2) continue;
-        const y = h - pad - Math.max(0, ys[i] / peak) * usable;
-        if (!started) { ctx.lineTo(x, h - pad); ctx.lineTo(x, y); started = true; }
-        else ctx.lineTo(x, y);
+        if (x < -4 || x > w + 4) continue;
+        const amp = Math.max(0, Math.min(1, ys[i] / peak));
+        pts.push({ x, y: h - pad - amp * usable });
       }
-      if (!started) return;
-      ctx.lineTo(w, h - pad);
+      if (pts.length < 2) return;
+
+      const x0 = pts[0].x;
+      const x1 = pts[pts.length - 1].x;
+
+      // Fill only under the actual sample span (not a triangle from the left edge).
+      ctx.beginPath();
+      ctx.moveTo(x0, h - pad);
+      for (let i = 0; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+      ctx.lineTo(x1, h - pad);
       ctx.closePath();
-      ctx.globalAlpha = 0.88;
+      ctx.fillStyle = color || '#123c32';
+      ctx.globalAlpha = 0.28;
       ctx.fill();
+
+      // Clean stroke along the envelope crest.
+      ctx.beginPath();
+      ctx.moveTo(pts[0].x, pts[0].y);
+      for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+      ctx.strokeStyle = color || '#123c32';
+      ctx.lineWidth = Math.max(1.5, 1.25 * dpr);
+      ctx.lineJoin = 'round';
+      ctx.lineCap = 'round';
+      ctx.globalAlpha = 0.95;
+      ctx.stroke();
       ctx.globalAlpha = 1;
+    }
+
+    function heardSeriesForView(viewStart, windowSec) {
+      // Prefer live recording bins; otherwise last finished clip.
+      if (clipCollecting && liveClipEnv.length) {
+        const xs = [];
+        const ys = [];
+        let peak = 0.0001;
+        // Map live bins across their real duration sitting at provisional file time.
+        const binSec = 4096 / (audioCtx ? audioCtx.sampleRate : 48000);
+        for (let i = 0; i < liveClipEnv.length; i++) {
+          xs.push(clipEnvFileAt + i * binSec - viewStart);
+          ys.push(liveClipEnv[i]);
+          if (liveClipEnv[i] > peak) peak = liveClipEnv[i];
+        }
+        return { xs, ys, peak, live: true };
+      }
+      if (clipEnv && clipEnv.length) {
+        const xs = [];
+        const ys = [];
+        let peak = 0.0001;
+        for (let i = 0; i < clipEnv.length; i++) {
+          xs.push(clipEnvFileAt + i / ENVELOPE_RATE - viewStart);
+          ys.push(clipEnv[i]);
+          if (clipEnv[i] > peak) peak = clipEnv[i];
+        }
+        return { xs, ys, peak, live: false };
+      }
+      return { xs: [], ys: [], peak: 0.0001, live: false };
     }
 
     function drawViewportMarker(ctx, w, h, sec, windowSec, color) {
@@ -3891,26 +3970,44 @@
       let micXs = [];
       let micYs = [];
       let micPeak = 0.0001;
-      if (scrolling && (trackingLocked || hasAlign)) {
+      const heard = heardSeriesForView(viewStart, windowSec);
+      if (scrolling && (trackingLocked || hasAlign) && !clipCollecting && !heard.xs.length) {
         const live = micLiveSeries(viewStart, windowSec);
         micXs = live.xs;
         micYs = live.ys;
         micPeak = live.peak;
-      } else if (clipEnv && clipEnv.length) {
-        const clipStart = scrolling ? viewStart : view.origin;
-        for (let i = 0; i < clipEnv.length; i++) {
-          micXs.push(clipEnvFileAt + i / ENVELOPE_RATE - clipStart);
-          micYs.push(clipEnv[i]);
-          if (clipEnv[i] > micPeak) micPeak = clipEnv[i];
+      } else if (heard.xs.length) {
+        micXs = heard.xs;
+        micYs = heard.ys;
+        micPeak = heard.peak;
+      } else if (scrolling && (trackingLocked || hasAlign)) {
+        const live = micLiveSeries(viewStart, windowSec);
+        micXs = live.xs;
+        micYs = live.ys;
+        micPeak = live.peak;
+      }
+
+      // If the clip sits outside the view, fall back to a local full-width draw.
+      let micWindowSec = windowSec;
+      let localHeard = false;
+      if (micXs.length) {
+        const minX = Math.min(...micXs);
+        const maxX = Math.max(...micXs);
+        if (maxX < 0 || minX > windowSec) {
+          const span = Math.max(0.5, maxX - minX);
+          micXs = micXs.map(x => (x - minX));
+          micWindowSec = span;
+          localHeard = true;
         }
       }
-      const gain = Math.max(0.25, Math.min(8, filePeak / micPeak));
+
+      const gain = Math.max(0.25, Math.min(8, filePeak / Math.max(micPeak, 0.0001)));
       const mark = scrolling
         ? view.playhead
         : (hasAlign ? (alignFileAt - view.origin) : null);
 
       const fileDraw = paintEnvelope(fileCanvas, '#123c32', mark, windowSec);
-      drawEnvelopeSeries(fileDraw.ctx, fileDraw.w, fileDraw.h, fileSeries.xs, fileSeries.ys, filePeak, windowSec);
+      drawEnvelopeSeries(fileDraw.ctx, fileDraw.w, fileDraw.h, fileSeries.xs, fileSeries.ys, filePeak, windowSec, '#123c32');
       if (mark != null) drawViewportMarker(fileDraw.ctx, fileDraw.w, fileDraw.h, mark, windowSec, '#b54708');
       if (scrolling && view.playheadBackup != null) {
         drawViewportMarker(fileDraw.ctx, fileDraw.w, fileDraw.h, view.playheadBackup, windowSec, '#123c32');
@@ -3918,32 +4015,28 @@
 
       const micDraw = paintEnvelope(micCanvas, '#1b6b45', mark, windowSec);
       const scaled = micYs.map(v => v * gain);
-      drawEnvelopeSeries(micDraw.ctx, micDraw.w, micDraw.h, micXs, scaled, filePeak, windowSec);
-      if (scrolling && clipEnv && clipEnv.length && clipCollecting) {
-        const clip = clipOverlaySeries(viewStart);
-        const clipScaled = clip.ys.map(v => v * Math.max(0.25, Math.min(8, filePeak / clip.peak)));
-        drawEnvelopeSeries(micDraw.ctx, micDraw.w, micDraw.h, clip.xs, clipScaled, filePeak, windowSec);
-      }
-      if (mark != null) drawViewportMarker(micDraw.ctx, micDraw.w, micDraw.h, mark, windowSec, '#b54708');
+      const micPeakDraw = localHeard ? Math.max(...scaled, 0.0001) : filePeak;
+      drawEnvelopeSeries(micDraw.ctx, micDraw.w, micDraw.h, micXs, scaled, micPeakDraw, micWindowSec, '#1b6b45');
+      if (mark != null && !localHeard) drawViewportMarker(micDraw.ctx, micDraw.w, micDraw.h, mark, windowSec, '#b54708');
 
       const viewEnd = Math.min(dur, viewStart + windowSec);
       if (scrolling) {
         $('fpFileLabel').textContent = 'Track · ' + fmtTime(viewStart) + ' – ' + fmtTime(viewEnd);
-        if (trackingLocked) {
-          $('fpMicLabel').textContent = clipCollecting
-            ? 'Mic · live (recording clip)'
-            : 'Mic · live (follows amp)';
+        if (clipCollecting) {
+          $('fpMicLabel').textContent = 'Heard · recording…';
+        } else if (clipEnv && clipEnv.length) {
+          $('fpMicLabel').textContent = 'Heard clip @ ' + fmtTime(clipEnvFileAt);
+        } else if (trackingLocked) {
+          $('fpMicLabel').textContent = 'Mic · live (follows amp)';
         } else {
-          $('fpMicLabel').textContent = clipCollecting
-            ? 'Mic · heard near ' + fmtTime(seekWindow().center)
-            : 'Mic · watching for amp';
+          $('fpMicLabel').textContent = 'Mic · watching';
         }
       } else {
         $('fpFileLabel').textContent = view.origin > 0.05
           ? ('Fingerprint from ' + fmtTime(view.origin))
           : 'File fingerprint';
         $('fpMicLabel').textContent = clipCollecting
-          ? 'Heard clip (recording…)'
+          ? 'Heard · recording…'
           : (clipEnv ? ('Heard clip @ ' + fmtTime(clipEnvFileAt)) : 'Heard clip (waiting)');
       }
 
@@ -3951,7 +4044,7 @@
       const spotBit = lastSpotStatus ? (' · ' + lastSpotStatus) : '';
       const scrollBit = scrolling && trackingLocked
         ? (' · scrolling @ amp ' + fmtTime(roomPosition()))
-        : (scrolling ? (' · seeking ' + fmtTime(seekWindow().center)) : '');
+        : (scrolling ? (' · clock ' + fmtTime(roomPosition())) : '');
       $('fpMeta').textContent =
         (scrolling
           ? ('Window ' + windowSec.toFixed(0) + ' s · ')
