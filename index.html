@@ -810,7 +810,7 @@
     <button type="button" class="btn" id="btnForgetFingerprints" style="width:100%;margin-top:8px">Clear stored fingerprints</button>
   </details>
 
-  <p class="ver mono" id="appVer">v1.6.16 · 2026-08-22 00:09</p>
+  <p class="ver mono" id="appVer">v1.6.16 · 2026-08-22 00:20</p>
   <p class="ver-note" id="appVerNote" hidden>v1.6.5 · Heard local bars · coverage soft when score/idf pass · near-miss keeps streak</p>
 
   <div class="bottom-bar">
@@ -830,7 +830,7 @@
   <script>
     const $ = id => document.getElementById(id);
     const APP_VER = '1.6.20';
-    const APP_BUILD = '2026-08-22 00:09';
+    const APP_BUILD = '2026-08-22 00:20';
 
     const ENVELOPE_RATE = 20;
     const TRAIL_STEP_MS = 1000;
@@ -1062,10 +1062,9 @@
     let silentTrackCooldownUntil = 0;
     let silentTrackLastSnapSec = -1; // last snapped burst — don't reuse until past it
     let silentTrackEligible = false; // only after a lock fails / drops — not at session start
-    let burstSlipOnsets = []; // { at, room, fileOnset, delta } — 20s fine-tune window
+    let burstSlipOnsets = []; // { at, room, fileOnset, delta } while soft-locked
     let burstSlipWasSpeech = false;
     let nextBurstSlipAt = 0;
-    let fineTuneFlash = null; // { until, avg, targetSec } — brief viz after apply
     let ampConfidenceVotes = []; // { bucket, score, weight, at, source }
     let ampVoteLeaderSec = null;
     let nextAmpVotePullAt = 0;
@@ -1923,18 +1922,7 @@
         } else if (clipCollecting && spotMode) {
           line += ' · spot-checking…';
         } else if (burstSlipOnsets.length) {
-          const spanMs = burstSlipOnsets[burstSlipOnsets.length - 1].at - burstSlipOnsets[0].at;
-          const live = fineTuneLiveStats();
-          line += ' · fine-tune ' + burstSlipOnsets.length + '/' +
-            Math.max(1, Math.round(BURST_SLIP_WINDOW_MS / 1000)) + 's';
-          if (live && live.avg != null) {
-            line += ' · avg ' + (live.avg >= 0 ? '+' : '') + live.avg.toFixed(2) + 's';
-          } else if (spanMs < BURST_SLIP_WINDOW_MS) {
-            line += ' · filling ' + (spanMs / 1000).toFixed(0) + 's';
-          }
-        } else if (fineTuneFlash && Date.now() < fineTuneFlash.until) {
-          line += ' · fine ' + (fineTuneFlash.avg >= 0 ? '+' : '') +
-            fineTuneFlash.avg.toFixed(2) + 's applied';
+          line += ' · burst slip ' + burstSlipOnsets.length + ' onsets';
         }
         if (lastSpotStatus) line += ' · ' + lastSpotStatus;
         if (!fileExpectsSpeech) return line + ' · file pause';
@@ -4679,8 +4667,8 @@
       ctx.stroke();
     }
 
-    // Short tick (file onset) or dashed tick (room estimate) for fine-tune samples.
-    function drawFineTuneTick(ctx, w, h, sec, windowSec, color, dashed) {
+    // Short tick for matched-clip span under Track (not fine-tune onset markers).
+    function drawShortTick(ctx, w, h, sec, windowSec, color, dashed) {
       if (sec == null || sec < 0 || sec > windowSec) return;
       const x = sec / windowSec * w;
       const dpr = Math.min(2, window.devicePixelRatio || 1);
@@ -4693,68 +4681,6 @@
       ctx.lineTo(x, dashed ? h * 0.55 : h * 0.4);
       ctx.stroke();
       ctx.restore();
-    }
-
-    function drawFineTuneMarkers(ctx, w, h, viewStart, windowSec) {
-      if (!trackingLocked) return;
-      const now = Date.now();
-      const flash = fineTuneFlash && now < fineTuneFlash.until ? fineTuneFlash : null;
-      const samples = burstSlipOnsets || [];
-      if (!samples.length && !flash && ampVoteLeaderSec == null) return;
-
-      for (let i = 0; i < samples.length; i++) {
-        const s = samples[i];
-        const fileRel = s.fileOnset - viewStart;
-        const roomRel = s.room - viewStart;
-        drawFineTuneTick(ctx, w, h, fileRel, windowSec, '#2a6f97', false);
-        drawFineTuneTick(ctx, w, h, roomRel, windowSec, '#8a5a2b', true);
-      }
-
-      const live = fineTuneLiveStats();
-      if (live && live.avg != null && samples.length) {
-        const targetRel = (roomPosition() + live.avg) - viewStart;
-        drawViewportMarker(ctx, w, h, targetRel, windowSec, '#c45c26');
-      }
-      if (flash) {
-        const flashRel = flash.targetSec - viewStart;
-        drawViewportMarker(ctx, w, h, flashRel, windowSec, '#c45c26');
-      }
-      if (ampVoteLeaderSec != null) {
-        drawViewportMarker(ctx, w, h, ampVoteLeaderSec - viewStart, windowSec, '#5b4a9e');
-      }
-    }
-
-    function fineTuneLiveStats() {
-      if (!burstSlipOnsets.length) return null;
-      const n = burstSlipOnsets.length;
-      const spanSec = (burstSlipOnsets[n - 1].at - burstSlipOnsets[0].at) / 1000;
-      const deltas = burstSlipOnsets.map(o => o.delta);
-      if (n === 1) {
-        return { avg: deltas[0], std: 0, kept: 1, dropped: 0, med: deltas[0], n, spanSec };
-      }
-      const stats = robustDeltaMean(deltas);
-      if (!stats) return { avg: null, std: null, kept: 0, dropped: n, med: null, n, spanSec };
-      return Object.assign({ n, spanSec }, stats);
-    }
-
-    function fineTuneMetaBit() {
-      if (!trackingLocked) return '';
-      const live = fineTuneLiveStats();
-      const winSec = Math.round(BURST_SLIP_WINDOW_MS / 1000);
-      if (live) {
-        const avgBit = live.avg != null
-          ? ('med ' + (live.avg >= 0 ? '+' : '') + live.avg.toFixed(2) + 's')
-          : 'med …';
-        const sigBit = live.std != null ? (' · σ ' + live.std.toFixed(2)) : '';
-        const bootBit = live.dropped ? (' · boot ' + live.dropped) : '';
-        return ' · fine ' + live.n + ' samples / ' + live.spanSec.toFixed(0) +
-          's · ' + avgBit + bootBit + sigBit + ' · window ' + winSec + 's';
-      }
-      if (fineTuneFlash && Date.now() < fineTuneFlash.until) {
-        return ' · fine applied ' + (fineTuneFlash.avg >= 0 ? '+' : '') +
-          fineTuneFlash.avg.toFixed(2) + 's → ' + fmtTime(fineTuneFlash.targetSec);
-      }
-      return '';
     }
 
     function renderFingerprintViz() {
@@ -4786,7 +4712,6 @@
       if (scrolling && view.playheadBackup != null) {
         drawViewportMarker(fileDraw.ctx, fileDraw.w, fileDraw.h, view.playheadBackup, windowSec, '#123c32');
       }
-      drawFineTuneMarkers(fileDraw.ctx, fileDraw.w, fileDraw.h, viewStart, windowSec);
 
       // Heard under Track:
       // Prefer time-aligned clip overlay after a match so clip length lines up with Track.
@@ -4801,10 +4726,9 @@
         const micDraw = paintEnvelope(micCanvas, '#1b6b45', mark, windowSec);
         drawEnvelopeSeries(micDraw.ctx, micDraw.w, micDraw.h, overlay.xs, overlay.ys, displayPeak, windowSec, '#1b6b45');
         if (mark != null) drawViewportMarker(micDraw.ctx, micDraw.w, micDraw.h, mark, windowSec, '#b54708');
-        // Clip span: start tick + end tick so length vs playhead is obvious.
         const clipDur = clipEnv.length / ENVELOPE_RATE;
-        drawFineTuneTick(micDraw.ctx, micDraw.w, micDraw.h, clipEnvFileAt - viewStart, windowSec, '#2a6f97', false);
-        drawFineTuneTick(micDraw.ctx, micDraw.w, micDraw.h, clipEnvFileAt + clipDur - viewStart, windowSec, '#2a6f97', true);
+        drawShortTick(micDraw.ctx, micDraw.w, micDraw.h, clipEnvFileAt - viewStart, windowSec, '#2a6f97', false);
+        drawShortTick(micDraw.ctx, micDraw.w, micDraw.h, clipEnvFileAt + clipDur - viewStart, windowSec, '#2a6f97', true);
       } else if (heardYs && heardYs.length >= 2) {
         drawHeardWave(micCanvas, heardYs, '#1b6b45', displayPeak);
       } else if (scrolling && (trackingLocked || hasAlign)) {
@@ -4854,13 +4778,12 @@
       const scrollBit = scrolling && trackingLocked
         ? (' · scrolling @ amp ' + fmtTime(roomPosition()))
         : (scrolling ? (' · clock ' + fmtTime(roomPosition())) : '');
-      const fineBit = fineTuneMetaBit();
       $('fpMeta').textContent =
         (scrolling
           ? ('Window ' + windowSec.toFixed(0) + ' s · ')
           : ((view.origin > 0.05 ? ('From first sound @ ' + fmtTime(view.origin) + ' · ') : 'From start · '))) +
         (templateIndex ? (templateIndex.hashCount + ' peak-hashes') : 'no hashes') +
-        ' · clip ' + lastClipHits + ' hits' + scrollBit + alignBit + fineBit + spotBit;
+        ' · clip ' + lastClipHits + ' hits' + scrollBit + alignBit + spotBit;
     }
 
     function matchBurstSequence(micBursts, fileBurstList) {
@@ -5097,7 +5020,6 @@
     function resetBurstSlip() {
       burstSlipOnsets = [];
       burstSlipWasSpeech = false;
-      fineTuneFlash = null;
     }
 
     // Boot sneeze/cough outliers: keep deltas near the median within ~2× gap gate.
@@ -5132,10 +5054,14 @@
       };
     }
 
-    // 20s moving-window fine-tune: mic silence→voice onsets vs nearest file onset.
-    // Runs while locked at any confidence (including ≥95%); pulls stay sub-second.
+    // Soft-lock only (<95%). Strong locks leave the clock alone — fine-tune needs a
+    // proper redesign before running at ≥95% again.
     function noteBurstOnsetForSlip(rms) {
       if (!trackingLocked) {
+        if (burstSlipOnsets.length) resetBurstSlip();
+        return;
+      }
+      if (lastMatchScore >= LOCK_CONFIDENCE_OK) {
         if (burstSlipOnsets.length) resetBurstSlip();
         return;
       }
@@ -5152,16 +5078,6 @@
           while (burstSlipOnsets.length && burstSlipOnsets[0].at < cutoff) {
             burstSlipOnsets.shift();
           }
-          pushClipLog({
-            kind: 'spot',
-            at: now,
-            line: 'FINE sample · Δ ' + (delta >= 0 ? '+' : '') + delta.toFixed(2) +
-              's · room@' + fmtTime(room) + ' → file@' + fmtTime(fileOnset) +
-              ' · n=' + burstSlipOnsets.length + '/' +
-              Math.round(BURST_SLIP_WINDOW_MS / 1000) + 's'
-          });
-          if (showDebug || showViz) renderFingerprintViz();
-          updateUI();
           maybeApplyBurstSlip();
         }
       }
@@ -5170,6 +5086,10 @@
 
     function maybeApplyBurstSlip() {
       if (Date.now() < nextBurstSlipAt) return false;
+      if (trackingLocked && lastMatchScore >= LOCK_CONFIDENCE_OK) {
+        resetBurstSlip();
+        return false;
+      }
       if (burstSlipOnsets.length < BURST_SLIP_MIN_ONSETS) return false;
       const t0 = burstSlipOnsets[0].at;
       const t1 = burstSlipOnsets[burstSlipOnsets.length - 1].at;
@@ -5184,10 +5104,9 @@
         pushClipLog({
           kind: 'spot',
           at: Date.now(),
-          line: 'FINE skip · ' + n + ' onsets / ' + spanSec.toFixed(0) +
+          line: 'BURST SLIP skip · ' + n + ' onsets / ' + spanSec.toFixed(0) +
             's · outliers boot · kept ' + (stats ? stats.kept : 0)
         });
-        if (showDebug || showViz) renderFingerprintViz();
         return false;
       }
       const avg = stats.avg;
@@ -5199,24 +5118,22 @@
         pushClipLog({
           kind: 'spot',
           at: Date.now(),
-          line: 'FINE skip · ' + stats.kept + '/' + n + ' onsets / ' + spanSec.toFixed(0) +
+          line: 'BURST SLIP skip · ' + stats.kept + '/' + n + ' onsets / ' + spanSec.toFixed(0) +
             's · avg ' + (avg >= 0 ? '+' : '') + avg.toFixed(2) +
             's · σ ' + std.toFixed(2) + 's (inconsistent)' +
             (stats.dropped ? (' · boot ' + stats.dropped) : '')
         });
-        if (showDebug || showViz) renderFingerprintViz();
         return false;
       }
       if (Math.abs(avg) < minAvg || Math.abs(avg) > maxAvg) {
         pushClipLog({
           kind: 'spot',
           at: Date.now(),
-          line: 'FINE skip · ' + stats.kept + '/' + n + ' onsets / ' + spanSec.toFixed(0) +
+          line: 'BURST SLIP skip · ' + stats.kept + '/' + n + ' onsets / ' + spanSec.toFixed(0) +
             's · avg ' + (avg >= 0 ? '+' : '') + avg.toFixed(2) +
             's (gate ' + gapMatchErrorGate().toFixed(2) + 's · max ±' + maxAvg.toFixed(2) + 's)' +
             (stats.dropped ? (' · boot ' + stats.dropped) : '')
         });
-        if (showDebug || showViz) renderFingerprintViz();
         return false;
       }
       const room = roomPosition();
@@ -5224,17 +5141,15 @@
       slipAmpClock(target);
       lastGoodOffset = target;
       lastGoodPerf = performance.now() / 1000;
-      fineTuneFlash = { until: Date.now() + 3000, avg, targetSec: target, roomSec: room };
-      lastSpotStatus = 'fine ' + (avg >= 0 ? '+' : '') + avg.toFixed(2) + 's';
+      lastSpotStatus = 'burst slip ' + (avg >= 0 ? '+' : '') + avg.toFixed(2) + 's';
       pushClipLog({
         kind: 'spot',
         at: Date.now(),
-        line: 'FINE · ' + stats.kept + '/' + n + ' onsets / ' + spanSec.toFixed(0) +
+        line: 'BURST SLIP · ' + stats.kept + '/' + n + ' onsets / ' + spanSec.toFixed(0) +
           's · avg ' + (avg >= 0 ? '+' : '') + avg.toFixed(2) +
           's · σ ' + std.toFixed(2) + 's → amp@' + fmtTime(target) +
           (stats.dropped ? (' · boot ' + stats.dropped + ' outlier') : '')
       });
-      if (showDebug || showViz) renderFingerprintViz();
       updateUI();
       return true;
     }
@@ -5515,8 +5430,8 @@
       castAmpElection(roomNow, lastMatchScore || LOCK_CONFIDENCE_OK, 'lock');
       nextBurstSlipAt = 0;
       lastSpotStatus = lockConfidenceOk()
-        ? ('locked ' + Math.round(lastMatchScore * 100) + '% · spot checks + fine-tune')
-        : ('locked ' + Math.round(lastMatchScore * 100) + '% · micro-align + fine-tune');
+        ? ('locked ' + Math.round(lastMatchScore * 100) + '% · spot checks')
+        : ('locked ' + Math.round(lastMatchScore * 100) + '% · micro-align + burst slip');
       manualMissStreak = 0;
       // Grace period after lock — give the system time to stabilise before cutout can fire.
       cutoutCooldownUntil = Date.now() + CUTOUT_COOLDOWN_MS;
