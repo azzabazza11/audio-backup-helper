@@ -785,10 +785,10 @@
     <p class="hint cal-hint" id="patternBlurHint">Second layer: quiet gaps in the file must also be quiet on the mic. Blur forgives early/late burst edges. Raise if the real amp barely misses; lower if talking still hits.</p>
     <div class="setting-row">
       <label for="gapMatchError">Gap match error gate</label>
-      <input type="range" id="gapMatchError" min="0.15" max="1.0" step="0.05" value="0.40" />
-      <span class="val mono" id="gapMatchErrorVal">0.40 s</span>
+      <input type="range" id="gapMatchError" min="0.08" max="0.50" step="0.01" value="0.15" />
+      <span class="val mono" id="gapMatchErrorVal">0.15 s</span>
     </div>
-    <p class="hint cal-hint">How tightly mic silence gaps must match the track’s first-minute gap fingerprint. Lower = stricter (more precise, fewer snaps). Raise if real amp timing is loose.</p>
+    <p class="hint cal-hint">How tightly silence gaps / onset slips must agree (identical tracks → keep this low). Outliers (coughs, sneezes) are rejected before averaging. Raise only if real amp timing is loose.</p>
     <div class="setting-row">
       <label for="gapConfidenceWeight">Gap weight in confidence</label>
       <input type="range" id="gapConfidenceWeight" min="0.05" max="0.5" step="0.05" value="0.25" />
@@ -810,7 +810,7 @@
     <button type="button" class="btn" id="btnForgetFingerprints" style="width:100%;margin-top:8px">Clear stored fingerprints</button>
   </details>
 
-  <p class="ver mono" id="appVer">v1.6.16 · 2026-08-21 23:10</p>
+  <p class="ver mono" id="appVer">v1.6.16 · 2026-08-21 23:29</p>
   <p class="ver-note" id="appVerNote" hidden>v1.6.5 · Heard local bars · coverage soft when score/idf pass · near-miss keeps streak</p>
 
   <div class="bottom-bar">
@@ -829,8 +829,8 @@
 
   <script>
     const $ = id => document.getElementById(id);
-    const APP_VER = '1.6.16';
-    const APP_BUILD = '2026-08-21 23:10';
+    const APP_VER = '1.6.17';
+    const APP_BUILD = '2026-08-21 23:29';
 
     const ENVELOPE_RATE = 20;
     const TRAIL_STEP_MS = 1000;
@@ -858,10 +858,16 @@
     const GAP_MATCH_NEAR_SEC = 30; // typical amp/file offset while hunting
     const GAP_MATCH_WIDE_SEC = 60; // rare: up to ~1 min apart
     const BURST_SLIP_WINDOW_MS = 20000; // collect onset deltas over ~20 s
-    const BURST_SLIP_MIN_ONSETS = 3;
-    const BURST_SLIP_MIN_AVG_SEC = 0.08;
-    const BURST_SLIP_MAX_AVG_SEC = 12;
-    const BURST_SLIP_COOLDOWN_MS = 15000;
+    const BURST_SLIP_MIN_ONSETS = 4;
+    const BURST_SLIP_COOLDOWN_MS = 20000;
+    // Amp-time election: high-conf polls win; consistently low-conf times lose.
+    const AMP_VOTE_BUCKET_SEC = 0.5;
+    const AMP_VOTE_MIN_SCORE = 0.90; // ≥90% → upvote this amp time
+    const AMP_VOTE_KEEP_MS = 180000; // ~3 min rolling ballot
+    const AMP_VOTE_MAX = 48;
+    const AMP_VOTE_WIN_MARGIN = 1.5; // net weight to hold the seat
+    const AMP_VOTE_PULL_MAX_SEC = 0.75; // identical decks: corrections stay sub-second
+    const AMP_VOTE_PULL_COOLDOWN_MS = 8000;
     const CUTOUT_BLIP_MS = 1200;
     const CUTOUT_COOLDOWN_MS = 12000;
     const CUTOUT_FAIL_COOLDOWN_MS = 20000;
@@ -938,7 +944,7 @@
         matchThreshold: 0.5,
         confirmHoldMs: 5000,
         patternBlurMs: 150,
-        gapMatchErrorSec: 0.40,
+        gapMatchErrorSec: 0.15,
         gapConfidenceWeight: 0.25,
         gapConfidenceBoost: 1.3,
         showDebug: false,
@@ -1054,6 +1060,9 @@
     let burstSlipOnsets = []; // { at, room, fileOnset, delta } while locked
     let burstSlipWasSpeech = false;
     let nextBurstSlipAt = 0;
+    let ampConfidenceVotes = []; // { bucket, score, weight, at, source }
+    let ampVoteLeaderSec = null;
+    let nextAmpVotePullAt = 0;
     let spotFileStart = 0;
     let spotChecksDone = 0;
     let nextSpotAt = 0;
@@ -1243,7 +1252,7 @@
         if (saved.matchThreshold != null) s.matchThreshold = clampSetting(saved.matchThreshold, 0.25, 0.85);
         if (saved.confirmHoldMs != null) s.confirmHoldMs = clampSetting(saved.confirmHoldMs, 3000, 10000);
         if (saved.patternBlurMs != null) s.patternBlurMs = clampSetting(saved.patternBlurMs, 0, 400);
-        if (saved.gapMatchErrorSec != null) s.gapMatchErrorSec = clampSetting(saved.gapMatchErrorSec, 0.15, 1.0);
+        if (saved.gapMatchErrorSec != null) s.gapMatchErrorSec = clampSetting(saved.gapMatchErrorSec, 0.08, 0.50);
         if (saved.gapConfidenceWeight != null) s.gapConfidenceWeight = clampSetting(saved.gapConfidenceWeight, 0.05, 0.5);
         if (saved.gapConfidenceBoost != null) s.gapConfidenceBoost = clampSetting(saved.gapConfidenceBoost, 0.5, 2.5);
         if (saved.showDebug != null) showDebug = !!saved.showDebug;
@@ -3280,6 +3289,7 @@
       nextSpotAt = 0;
       silentTrackEligible = true; // recovery only — silent markers after lock fails
       resetBurstSlip();
+      resetAmpVotes();
       pushClipLog({
         kind: 'miss',
         at: Date.now(),
@@ -3665,6 +3675,7 @@
             ' · streak ' + hitStreak + '/' + MIN_LOCK_CLIPS +
             ' · hold ' + (confirmHeldMs / 1000).toFixed(1) + 's'
         });
+        castAmpElection(result.offsetSec, result.score, 'hit');
         const enoughClips = hitStreak >= MIN_LOCK_CLIPS;
         const enoughHold = confirmHeldMs >= state.settings.confirmHoldMs;
         if (enoughClips && enoughHold) {
@@ -3702,6 +3713,8 @@
             line: (state.mode === 'seeking' ? 'SEEK MISS ' : state.mode === 'manual' ? 'MAN MISS ' : 'MISS ') +
               base + ' · ' + lastClipFail
           });
+          // Hard miss at this amp guess → lose election weight.
+          castAmpElection(expectSec, result.score, 'miss');
         }
         if (state.mode === 'manual' && !trackingLocked) manualMissStreak += 1;
         if (confirmStartedAt) {
@@ -3940,6 +3953,12 @@
         slipAmpClock(result.offsetSec);
         slipped = drift;
       }
+      // Vote the matched amp time when strong; downvote the room clock when weak.
+      if (result.score >= AMP_VOTE_MIN_SCORE || canSlip) {
+        castAmpElection(result.offsetSec, result.score, 'micro');
+      } else {
+        castAmpElection(fileStart, result.score, 'micro weak');
+      }
       const confPct = Math.round(lastMatchScore * 100);
       pushClipLog({
         kind: confPct >= LOCK_CONFIDENCE_OK * 100 ? 'lock' : 'spot',
@@ -4005,6 +4024,8 @@
         at: Date.now(),
         line: (good ? 'SPOT OK  ' : 'SPOT WEAK ') + base + failBit
       });
+      // Spot polls the current amp time: OK keeps the seat, weak/low loses it.
+      castAmpElection(good ? absOffset : fileStart, result.score, good ? 'spot' : 'spot weak');
       if (notePostLockConfidence(result.score, good ? 'spot' : 'spot weak')) {
         return;
       }
@@ -4733,7 +4754,20 @@
     }
 
     function gapMatchErrorGate() {
-      return clampSetting(state.settings.gapMatchErrorSec != null ? state.settings.gapMatchErrorSec : 0.40, 0.15, 1.0);
+      return clampSetting(state.settings.gapMatchErrorSec != null ? state.settings.gapMatchErrorSec : 0.15, 0.08, 0.50);
+    }
+
+    // Pair / slip caps scale with the gap error gate (identical tracks → keep tiny).
+    function burstSlipPairSec() {
+      return Math.min(0.75, Math.max(0.25, gapMatchErrorGate() * 2.5));
+    }
+
+    function burstSlipMaxAvgSec() {
+      return Math.min(AMP_VOTE_PULL_MAX_SEC, Math.max(0.25, gapMatchErrorGate() * 3));
+    }
+
+    function burstSlipMinAvgSec() {
+      return Math.max(0.08, gapMatchErrorGate() * 0.6);
     }
 
     function gapMatchSearchRadius() {
@@ -4742,19 +4776,135 @@
       return GAP_MATCH_NEAR_SEC;
     }
 
-    // Nearest file burst onset at/ahead of our clock (amp is typically ahead).
-    function nearestFileOnsetAhead(roomSec) {
-      if (!fileBursts || !fileBursts.length) return null;
+    function ampVoteBucket(sec) {
+      return Math.round(sec / AMP_VOTE_BUCKET_SEC) * AMP_VOTE_BUCKET_SEC;
+    }
+
+    function resetAmpVotes() {
+      ampConfidenceVotes = [];
+      ampVoteLeaderSec = null;
+      nextAmpVotePullAt = 0;
+    }
+
+    function pruneAmpVotes(now) {
+      const cutoff = now - AMP_VOTE_KEEP_MS;
+      while (ampConfidenceVotes.length && ampConfidenceVotes[0].at < cutoff) {
+        ampConfidenceVotes.shift();
+      }
+      while (ampConfidenceVotes.length > AMP_VOTE_MAX) ampConfidenceVotes.shift();
+    }
+
+    function tallyAmpVotes() {
+      const tallies = Object.create(null);
+      for (let i = 0; i < ampConfidenceVotes.length; i++) {
+        const v = ampConfidenceVotes[i];
+        const k = String(v.bucket);
+        if (!tallies[k]) tallies[k] = { bucket: v.bucket, weight: 0, n: 0 };
+        tallies[k].weight += v.weight;
+        tallies[k].n += 1;
+      }
+      return tallies;
+    }
+
+    function recomputeAmpVoteLeader() {
+      const tallies = tallyAmpVotes();
       let best = null;
-      let bestRank = 1e9;
+      let bestW = -1e9;
+      for (const k in tallies) {
+        const t = tallies[k];
+        if (t.weight > bestW) {
+          bestW = t.weight;
+          best = t.bucket;
+        }
+      }
+      // Seat requires a clear positive mandate; losers stay seated-out.
+      ampVoteLeaderSec = best != null && bestW >= AMP_VOTE_WIN_MARGIN ? best : null;
+      return { leader: ampVoteLeaderSec, weight: bestW, tallies };
+    }
+
+    // Running poll on amp time. High confidence elects that time; a stretch of low
+    // confidence at a time costs it the seat so a better alignment can win.
+    function castAmpElection(ampSec, score, source) {
+      if (ampSec == null || !isFinite(ampSec) || ampSec < 0) return;
+      if (score == null || !isFinite(score)) return;
+      const bucket = ampVoteBucket(ampSec);
+      const now = Date.now();
+      let weight;
+      let ballot;
+      if (score >= AMP_VOTE_MIN_SCORE) {
+        // Strong yes — scales up toward 100%.
+        weight = 0.55 + (score - AMP_VOTE_MIN_SCORE) / Math.max(0.01, 1 - AMP_VOTE_MIN_SCORE);
+        ballot = 'yes';
+      } else if (score < LOCK_DROP_SCORE) {
+        // Consistently bad → hard downvote; loses the election.
+        weight = -1.2 - (LOCK_DROP_SCORE - score) * 2;
+        ballot = 'no';
+      } else {
+        // Soft no — mediocre polls erode the seat over time.
+        weight = -0.35 - (AMP_VOTE_MIN_SCORE - score);
+        ballot = 'soft';
+      }
+      ampConfidenceVotes.push({ bucket, score, weight, at: now, source: source || 'poll', ballot });
+      pruneAmpVotes(now);
+      const elect = recomputeAmpVoteLeader();
+      if (ballot === 'no' || ballot === 'soft') {
+        const roomBucket = ampVoteBucket(roomPosition());
+        const roomT = elect.tallies[String(roomBucket)];
+        if (roomT && roomT.weight < -AMP_VOTE_WIN_MARGIN &&
+            elect.leader != null && Math.abs(elect.leader - roomBucket) >= AMP_VOTE_BUCKET_SEC * 0.5) {
+          pushClipLog({
+            kind: 'spot',
+            at: now,
+            line: 'AMP VOTE lose · @' + fmtTime(roomBucket) +
+              ' net ' + roomT.weight.toFixed(1) +
+              ' · leader @' + fmtTime(elect.leader) +
+              ' (' + Math.round(score * 100) + '% · ' + (source || 'poll') + ')'
+          });
+        }
+      }
+      maybePullTowardVoteLeader();
+    }
+
+    function maybePullTowardVoteLeader() {
+      if (!trackingLocked || ampVoteLeaderSec == null) return false;
+      if (Date.now() < nextAmpVotePullAt) return false;
+      const room = roomPosition();
+      const drift = ampVoteLeaderSec - room;
+      const gate = gapMatchErrorGate();
+      const maxPull = Math.min(AMP_VOTE_PULL_MAX_SEC, Math.max(0.35, gate * 3));
+      const minPull = Math.max(0.08, gate * 0.5);
+      if (Math.abs(drift) < minPull || Math.abs(drift) > maxPull) return false;
+      // Partial nudge — never a multi-second yank.
+      const step = Math.sign(drift) * Math.min(Math.abs(drift), Math.max(gate, 0.12));
+      slipAmpClock(room + step);
+      lastGoodOffset = room + step;
+      lastGoodPerf = performance.now() / 1000;
+      nextAmpVotePullAt = Date.now() + AMP_VOTE_PULL_COOLDOWN_MS;
+      lastSpotStatus = 'amp vote pull ' + (step >= 0 ? '+' : '') + step.toFixed(2) + 's';
+      pushClipLog({
+        kind: 'spot',
+        at: Date.now(),
+        line: 'AMP VOTE pull · ' + (step >= 0 ? '+' : '') + step.toFixed(2) +
+          's → amp@' + fmtTime(room + step) +
+          ' · leader @' + fmtTime(ampVoteLeaderSec) +
+          ' · gate ' + gate.toFixed(2) + 's'
+      });
+      updateUI();
+      return true;
+    }
+
+    // Nearest file burst onset within the gap-gate pair radius (not "always ahead").
+    function nearestFileOnsetNear(roomSec) {
+      if (!fileBursts || !fileBursts.length) return null;
+      const pairSec = burstSlipPairSec();
+      let best = null;
+      let bestAbs = 1e9;
       for (let i = 0; i < fileBursts.length; i++) {
         const start = fileBursts[i].start;
-        if (start < roomSec - 2.5) continue;
-        if (start > roomSec + 18) break;
-        const d = start - roomSec;
-        const rank = d < 0 ? (-d + 4) : d;
-        if (rank < bestRank) {
-          bestRank = rank;
+        const d = Math.abs(start - roomSec);
+        if (d > pairSec) continue;
+        if (d < bestAbs) {
+          bestAbs = d;
           best = start;
         }
       }
@@ -4766,10 +4916,47 @@
       burstSlipWasSpeech = false;
     }
 
-    // While locked in spot mode: record silence→voice onsets vs file burst starts.
-    // After ~20 s of samples, average delta is the slip to line tracks up.
+    // Boot sneeze/cough outliers: keep deltas near the median within ~2× gap gate.
+    function robustDeltaMean(deltas) {
+      if (!deltas || deltas.length < 2) return null;
+      const sorted = deltas.slice().sort((a, b) => a - b);
+      const mid = Math.floor(sorted.length / 2);
+      const med = sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+      const gate = gapMatchErrorGate();
+      const band = Math.max(gate * 2, 0.2);
+      const kept = [];
+      for (let i = 0; i < deltas.length; i++) {
+        if (Math.abs(deltas[i] - med) <= band) kept.push(deltas[i]);
+      }
+      if (kept.length < Math.max(2, BURST_SLIP_MIN_ONSETS - 1)) {
+        return { avg: null, std: null, kept: kept.length, med, dropped: deltas.length - kept.length };
+      }
+      let sum = 0;
+      for (let i = 0; i < kept.length; i++) sum += kept[i];
+      const avg = sum / kept.length;
+      let varSum = 0;
+      for (let i = 0; i < kept.length; i++) {
+        const d = kept[i] - avg;
+        varSum += d * d;
+      }
+      return {
+        avg,
+        std: Math.sqrt(varSum / kept.length),
+        kept: kept.length,
+        med,
+        dropped: deltas.length - kept.length
+      };
+    }
+
+    // Burst-onset slip is for soft locks only. A strong ≥95% lock must not be walked
+    // forward by pairing every mic onset to the *next* file burst (log #1).
     function noteBurstOnsetForSlip(rms) {
-      if (!trackingLocked || !lockConfidenceOk()) {
+      if (!trackingLocked) {
+        if (burstSlipOnsets.length) resetBurstSlip();
+        return;
+      }
+      // Strong fingerprint lock — leave the clock alone; election handles micro-drift.
+      if (lastMatchScore >= LOCK_CONFIDENCE_OK) {
         if (burstSlipOnsets.length) resetBurstSlip();
         return;
       }
@@ -4777,7 +4964,7 @@
       const heard = rms > state.settings.silenceThreshold;
       if (heard && !burstSlipWasSpeech) {
         const room = roomPosition();
-        const fileOnset = nearestFileOnsetAhead(room);
+        const fileOnset = nearestFileOnsetNear(room);
         if (fileOnset != null) {
           const delta = fileOnset - room;
           const now = Date.now();
@@ -4794,23 +4981,53 @@
 
     function maybeApplyBurstSlip() {
       if (Date.now() < nextBurstSlipAt) return false;
+      if (trackingLocked && lastMatchScore >= LOCK_CONFIDENCE_OK) {
+        resetBurstSlip();
+        return false;
+      }
       if (burstSlipOnsets.length < BURST_SLIP_MIN_ONSETS) return false;
       const t0 = burstSlipOnsets[0].at;
       const t1 = burstSlipOnsets[burstSlipOnsets.length - 1].at;
       if (t1 - t0 < BURST_SLIP_WINDOW_MS) return false;
-      let sum = 0;
-      for (let i = 0; i < burstSlipOnsets.length; i++) sum += burstSlipOnsets[i].delta;
-      const avg = sum / burstSlipOnsets.length;
-      const n = burstSlipOnsets.length;
+      const deltas = burstSlipOnsets.map(o => o.delta);
+      const n = deltas.length;
       const spanSec = (t1 - t0) / 1000;
+      const stats = robustDeltaMean(deltas);
       burstSlipOnsets = [];
       nextBurstSlipAt = Date.now() + BURST_SLIP_COOLDOWN_MS;
-      if (Math.abs(avg) < BURST_SLIP_MIN_AVG_SEC || Math.abs(avg) > BURST_SLIP_MAX_AVG_SEC) {
+      if (!stats || stats.avg == null) {
         pushClipLog({
           kind: 'spot',
           at: Date.now(),
           line: 'BURST SLIP skip · ' + n + ' onsets / ' + spanSec.toFixed(0) +
-            's · avg ' + (avg >= 0 ? '+' : '') + avg.toFixed(2) + 's (out of range)'
+            's · outliers boot · kept ' + (stats ? stats.kept : 0)
+        });
+        return false;
+      }
+      const avg = stats.avg;
+      const std = stats.std;
+      const maxStd = Math.max(0.2, gapMatchErrorGate() * 2);
+      const minAvg = burstSlipMinAvgSec();
+      const maxAvg = burstSlipMaxAvgSec();
+      if (std > maxStd) {
+        pushClipLog({
+          kind: 'spot',
+          at: Date.now(),
+          line: 'BURST SLIP skip · ' + stats.kept + '/' + n + ' onsets / ' + spanSec.toFixed(0) +
+            's · avg ' + (avg >= 0 ? '+' : '') + avg.toFixed(2) +
+            's · σ ' + std.toFixed(2) + 's (inconsistent)' +
+            (stats.dropped ? (' · boot ' + stats.dropped) : '')
+        });
+        return false;
+      }
+      if (Math.abs(avg) < minAvg || Math.abs(avg) > maxAvg) {
+        pushClipLog({
+          kind: 'spot',
+          at: Date.now(),
+          line: 'BURST SLIP skip · ' + stats.kept + '/' + n + ' onsets / ' + spanSec.toFixed(0) +
+            's · avg ' + (avg >= 0 ? '+' : '') + avg.toFixed(2) +
+            's (gate ' + gapMatchErrorGate().toFixed(2) + 's · max ±' + maxAvg.toFixed(2) + 's)' +
+            (stats.dropped ? (' · boot ' + stats.dropped) : '')
         });
         return false;
       }
@@ -4822,8 +5039,10 @@
       pushClipLog({
         kind: 'spot',
         at: Date.now(),
-        line: 'BURST SLIP · ' + n + ' onsets / ' + spanSec.toFixed(0) +
-          's · avg ' + (avg >= 0 ? '+' : '') + avg.toFixed(2) + 's → amp@' + fmtTime(room + avg)
+        line: 'BURST SLIP · ' + stats.kept + '/' + n + ' onsets / ' + spanSec.toFixed(0) +
+          's · avg ' + (avg >= 0 ? '+' : '') + avg.toFixed(2) +
+          's · σ ' + std.toFixed(2) + 's → amp@' + fmtTime(room + avg) +
+          (stats.dropped ? (' · boot ' + stats.dropped + ' outlier') : '')
       });
       updateUI();
       return true;
@@ -5091,10 +5310,13 @@
       resetSilentTrack();
       silentTrackEligible = false; // fresh lock — normal tracking until it fails again
       resetBurstSlip();
+      resetAmpVotes();
+      // Seed the election with the lock hit so a good amp time starts with a mandate.
+      castAmpElection(roomNow, lastMatchScore || LOCK_CONFIDENCE_OK, 'lock');
       nextBurstSlipAt = 0;
       lastSpotStatus = lockConfidenceOk()
-        ? ('locked ' + Math.round(lastMatchScore * 100) + '% · spot checks + burst slip')
-        : ('locked ' + Math.round(lastMatchScore * 100) + '% · micro-aligning toward 95%');
+        ? ('locked ' + Math.round(lastMatchScore * 100) + '% · spot checks')
+        : ('locked ' + Math.round(lastMatchScore * 100) + '% · micro-align + burst slip');
       manualMissStreak = 0;
       // Grace period after lock — give the system time to stabilise before cutout can fire.
       cutoutCooldownUntil = Date.now() + CUTOUT_COOLDOWN_MS;
@@ -5309,6 +5531,7 @@
         resetSilentTrack();
         silentTrackEligible = false;
         resetBurstSlip();
+        resetAmpVotes();
         nextBurstSlipAt = 0;
         lastSpotStatus = '';
         startClipCapture();
@@ -5411,6 +5634,7 @@
       silentTrackLastSnapSec = -1;
       silentTrackEligible = false;
       resetBurstSlip();
+      resetAmpVotes();
       nextBurstSlipAt = 0;
       lastSpotStatus = '';
       state.analysing = false;
@@ -5704,7 +5928,7 @@
       scheduleSaveSettings();
     });
     $('gapMatchError').addEventListener('input', e => {
-      state.settings.gapMatchErrorSec = clampSetting(+e.target.value, 0.15, 1.0);
+      state.settings.gapMatchErrorSec = clampSetting(+e.target.value, 0.08, 0.50);
       $('gapMatchErrorVal').textContent = state.settings.gapMatchErrorSec.toFixed(2) + ' s';
       scheduleSaveSettings();
     });
