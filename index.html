@@ -804,7 +804,7 @@
     <button type="button" class="btn" id="btnForgetFingerprints" style="width:100%;margin-top:8px">Clear stored fingerprints</button>
   </details>
 
-  <p class="ver mono" id="appVer">v1.6.11 · 2026-08-21 22:24</p>
+  <p class="ver mono" id="appVer">v1.6.12 · 2026-08-21 22:27</p>
   <p class="ver-note" id="appVerNote" hidden>v1.6.5 · Heard local bars · coverage soft when score/idf pass · near-miss keeps streak</p>
 
   <div class="bottom-bar">
@@ -823,8 +823,8 @@
 
   <script>
     const $ = id => document.getElementById(id);
-    const APP_VER = '1.6.11';
-    const APP_BUILD = '2026-08-21 22:24';
+    const APP_VER = '1.6.12';
+    const APP_BUILD = '2026-08-21 22:27';
 
     const ENVELOPE_RATE = 20;
     const TRAIL_STEP_MS = 1000;
@@ -1581,10 +1581,7 @@
     }
 
     function effectiveTrailMs() {
-      if (trackingLocked && manualMeasuredTrailMs) {
-        return normalizeTrailMs(manualMeasuredTrailMs + manualTrailAdjustMs);
-      }
-      if (trackingLocked && lockedBufferMs) return lockedBufferMs;
+      // Trail is the user setting only — never auto-measured on lock.
       return normalizeTrailMs(state.settings.bufferDelayMs);
     }
 
@@ -1749,7 +1746,7 @@
     function applyTrailToPlayback() {
       if (!backupAudio || !trackingLocked) return;
       const room = roomPosition();
-      const target = Math.max(0, room - lockedBufferMs / 1000);
+      const target = Math.max(0, room - effectiveTrailMs() / 1000);
       if (Math.abs(backupAudio.currentTime - target) > 0.12) {
         backupAudio.currentTime = target;
       }
@@ -1760,15 +1757,9 @@
       const next = normalizeTrailMs(current + deltaMs);
       if (next === current) return;
       state.settings.bufferDelayMs = next;
-      if (trackingLocked && manualMeasuredTrailMs) {
-        manualTrailAdjustMs = next - manualMeasuredTrailMs;
-        lockedBufferMs = next;
-        manualTemplate = null;
-        manualWinStart = -1;
-        manualWinDur = 0;
-      } else if (trackingLocked) {
-        lockedBufferMs = next;
-      }
+      lockedBufferMs = next;
+      manualMeasuredTrailMs = 0;
+      manualTrailAdjustMs = 0;
       syncBufferDelayUi();
       applyTrailToPlayback();
       scheduleSaveSettings();
@@ -1870,13 +1861,13 @@
           if (clipCollecting) return 'Tracking · recording clip near the expected file time…';
           if (confirmStartedAt) {
             return 'Tracking · matching ' + (confirmHeldMs / 1000).toFixed(1) + ' / ' +
-              (state.settings.confirmHoldMs / 1000).toFixed(1) + ' s · trail preset ' +
+              (state.settings.confirmHoldMs / 1000).toFixed(1) + ' s · trail ' +
               fmtTrailMs(effectiveTrailMs());
           }
-          if (lastClipStatus === 'miss') return 'Tracking · last clip missed · trail preset ' + fmtTrailMs(effectiveTrailMs());
-          return 'Tracking · listening for local match · trail preset ' + fmtTrailMs(effectiveTrailMs());
+          if (lastClipStatus === 'miss') return 'Tracking · last clip missed · trail ' + fmtTrailMs(effectiveTrailMs());
+          return 'Tracking · listening for local match · trail ' + fmtTrailMs(effectiveTrailMs());
         }
-        let line = 'Tracking · trail measured ' + fmtTrailMs(effectiveTrailMs());
+        let line = 'Tracking · trail ' + fmtTrailMs(effectiveTrailMs());
         if (!lockHoldOk()) {
           line += ' · confidence soft · may drop lock';
         } else if (!lockConfidenceOk()) {
@@ -2858,7 +2849,7 @@
         if (state.mode === 'cutout') v.textContent = 'Lost — mic quiet where the file still has speech';
         else if (state.mode === 'backing') v.textContent = 'Playing backup';
         else if (state.mode === 'manual') {
-          v.textContent = trackingLocked ? 'Tracking with measured trail' : 'Tracking with user-started clock';
+          v.textContent = trackingLocked ? 'Tracking · trail from settings' : 'Tracking with user-started clock';
         } else if (state.mode === 'armed') v.textContent = trackingLocked ? 'Locked on the amp' : 'Listening';
         else if (state.mode === 'seeking') {
           v.textContent = confirmStartedAt ? 'Amp heard — confirming lock' : 'Watching for the amp';
@@ -3777,13 +3768,9 @@
       pushClipLog({ kind: 'lock', at: Date.now(),
         line: 'CUTOUT RELOCK OK attempt ' + cutoutRelockAttempts +
           (judged.nearMiss && !judged.ok ? ' (near)' : '') + ' · ' + base });
-      // Recalculate trail relative to the new file position.
-      const backupNow = manualClockSec();
+      // Keep the user's trail setting — do not re-measure from clock skew.
       const newRoom = result.offsetSec;
-      manualMeasuredTrailMs = normalizeTrailMs((newRoom - backupNow) * 1000);
-      lockedBufferMs = normalizeTrailMs(manualMeasuredTrailMs + manualTrailAdjustMs);
-      state.settings.bufferDelayMs = lockedBufferMs;
-      syncBufferDelayUi();
+      lockedBufferMs = effectiveTrailMs();
       lockPositionSec = newRoom;
       lockClockAt = Date.now();
       trackingLocked = true;
@@ -4865,11 +4852,10 @@
     async function activateSync(fingerprintSec, confirmMs) {
       const roomNow = fingerprintSec + confirmMs / 1000;
 
-      const backupNow = manualClockSec();
-      const computedTrail = normalizeTrailMs((roomNow - backupNow) * 1000);
-      manualMeasuredTrailMs = computedTrail;
-      lockedBufferMs = normalizeTrailMs(manualMeasuredTrailMs + manualTrailAdjustMs);
-      state.settings.bufferDelayMs = lockedBufferMs;
+      // Trail stays at the settings value — never overwrite from lock timing.
+      lockedBufferMs = effectiveTrailMs();
+      manualMeasuredTrailMs = 0;
+      manualTrailAdjustMs = 0;
       syncBufferDelayUi();
       lockPositionSec = roomNow;
       lockClockAt = Date.now();
@@ -5459,15 +5445,9 @@
     $('bufferDelay').addEventListener('input', e => {
       const next = normalizeTrailMs(+e.target.value);
       state.settings.bufferDelayMs = next;
-      if (trackingLocked && manualMeasuredTrailMs) {
-        manualTrailAdjustMs = next - manualMeasuredTrailMs;
-        lockedBufferMs = next;
-        manualTemplate = null;
-        manualWinStart = -1;
-        manualWinDur = 0;
-      } else if (trackingLocked) {
-        lockedBufferMs = next;
-      }
+      lockedBufferMs = next;
+      manualMeasuredTrailMs = 0;
+      manualTrailAdjustMs = 0;
       syncBufferDelayUi();
       applyTrailToPlayback();
       scheduleSaveSettings();

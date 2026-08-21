@@ -1,7 +1,7 @@
 {
   "id": "audio-backup-helper",
   "title": "Back Me Up",
-  "version": "1.6.11",
+  "version": "1.6.12",
   "desc": "Arm a backup audio track, listen via mic, and take over instantly if the main amplifier cuts out. Audio stays on device.",
   "icon": "icon.svg",
   "iconPath": "icon.svg",
@@ -22,6 +22,11 @@
     "fingerprint"
   ],
   "changelog": [
+    {
+      "version": "1.6.12",
+      "date": "2026-08-21",
+      "notes": "Trail is settings-only; stop auto-measuring/overwriting to 1s on lock"
+    },
     {
       "version": "1.6.11",
       "date": "2026-08-21",
