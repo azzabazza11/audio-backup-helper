@@ -804,7 +804,7 @@
     <button type="button" class="btn" id="btnForgetFingerprints" style="width:100%;margin-top:8px">Clear stored fingerprints</button>
   </details>
 
-  <p class="ver mono" id="appVer">v1.6.12 · 2026-08-21 22:27</p>
+  <p class="ver mono" id="appVer">v1.6.13 · 2026-08-21 22:34</p>
   <p class="ver-note" id="appVerNote" hidden>v1.6.5 · Heard local bars · coverage soft when score/idf pass · near-miss keeps streak</p>
 
   <div class="bottom-bar">
@@ -823,8 +823,8 @@
 
   <script>
     const $ = id => document.getElementById(id);
-    const APP_VER = '1.6.12';
-    const APP_BUILD = '2026-08-21 22:27';
+    const APP_VER = '1.6.13';
+    const APP_BUILD = '2026-08-21 22:34';
 
     const ENVELOPE_RATE = 20;
     const TRAIL_STEP_MS = 1000;
@@ -859,8 +859,10 @@
     const STRONG_LOCK_SILENCE_MULT = 3.0;
     const CLIP_MIN_SEC = 1.0;
     const CLIP_MAX_SEC = 30.0;
-    const CLIP_PREROLL_SEC = 0.6;
-    const BURST_TAIL_MS = 350;
+    // Rolling mic ring: when a burst starts, prepend this much audio so the onset isn't clipped.
+    const CLIP_PREROLL_SEC = 0.2; // ~200 ms — enough attack, not a long quiet pad
+    // End a clip only after this much continuous silence (natural speech pauses are shorter).
+    const BURST_TAIL_MS = 400;
     const TILE_SEC = 10;
     const FP_INDEX_SEC = 30;  // seconds of file fingerprinted for viz / initial index
     const TILE_STEP_SEC = 5;
