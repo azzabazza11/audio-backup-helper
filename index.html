@@ -748,7 +748,7 @@
     </div>
     <div class="setting-row">
       <label for="silenceThreshold">Mic silence (RMS below this = quiet)</label>
-      <input type="range" id="silenceThreshold" min="0.005" max="0.08" step="0.005" value="0.02" />
+      <input type="range" id="silenceThreshold" min="0.005" max="0.035" step="0.001" value="0.02" />
       <span class="val mono" id="silenceThresholdVal">0.02</span>
     </div>
     <div class="setting-row">
@@ -804,7 +804,7 @@
     <button type="button" class="btn" id="btnForgetFingerprints" style="width:100%;margin-top:8px">Clear stored fingerprints</button>
   </details>
 
-  <p class="ver mono" id="appVer">v1.6.5 · 2026-08-21 20:35</p>
+  <p class="ver mono" id="appVer">v1.6.5 · 2026-08-21 20:38</p>
   <p class="ver-note" id="appVerNote" hidden>v1.6.5 · Heard local bars · coverage soft when score/idf pass · near-miss keeps streak</p>
 
   <div class="bottom-bar">
@@ -824,7 +824,7 @@
   <script>
     const $ = id => document.getElementById(id);
     const APP_VER = '1.6.5';
-    const APP_BUILD = '2026-08-21 20:35';
+    const APP_BUILD = '2026-08-21 20:38';
 
     const ENVELOPE_RATE = 20;
     const TRAIL_STEP_MS = 1000;
@@ -862,7 +862,7 @@
     const HOLD_CONTINUE_RATIO = 0.7;
     const ALIGN_MATCH_FLOOR = 0.28;
     const SILENCE_MIN = 0.005;
-    const SILENCE_MAX = 0.08;
+    const SILENCE_MAX = 0.035;
     const AMBIENT_SAMPLES = 40;
     const AMBIENT_MULT = 2.4;
     const MIC_METER_MAX = 0.15;
@@ -2096,7 +2096,7 @@
 
     function suggestedSilenceGate() {
       const raw = ambientRms * AMBIENT_MULT + 0.004;
-      const stepped = Math.round(raw / 0.005) * 0.005;
+      const stepped = Math.round(raw / 0.001) * 0.001;
       return Math.min(SILENCE_MAX, Math.max(SILENCE_MIN, stepped));
     }
 
