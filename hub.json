@@ -1,17 +1,32 @@
 {
   "id": "audio-backup-helper",
   "title": "Back Me Up",
-  "version": "1.6.4",
+  "version": "1.6.5",
   "desc": "Arm a backup audio track, listen via mic, and take over instantly if the main amplifier cuts out. Audio stays on device.",
   "icon": "icon.svg",
   "iconPath": "icon.svg",
-  "platforms": ["web", "android", "ios"],
+  "platforms": [
+    "web",
+    "android",
+    "ios"
+  ],
   "status": "live",
   "installable": true,
   "desktopUrl": "https://azzabazza11.github.io/audio-backup-helper/",
   "appUrl": "https://azzabazza11.github.io/audio-backup-helper/",
-  "tags": ["audio", "pwa", "backup", "mic", "fingerprint"],
+  "tags": [
+    "audio",
+    "pwa",
+    "backup",
+    "mic",
+    "fingerprint"
+  ],
   "changelog": [
+    {
+      "version": "1.6.5",
+      "date": "2026-08-21",
+      "notes": "Heard wave always visible (local bars); coverage soft when score/idf pass; near-miss keeps streak"
+    },
     {
       "version": "1.6.4",
       "date": "2026-08-20",

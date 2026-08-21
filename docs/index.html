@@ -771,7 +771,7 @@
       <input type="range" id="matchThreshold" min="0.25" max="0.85" step="0.05" value="0.5" />
       <span class="val mono" id="matchThresholdVal">0.50</span>
     </div>
-    <p class="hint cal-hint" id="lockNeedHint">A clip is a hit only if rare-hash score, coverage of hashes that exist in the file, and file-pause quiet all pass. Lock needs two hits in a row plus the hold time. Talking should fail; the real file should pass by a wide margin.</p>
+    <p class="hint cal-hint" id="lockNeedHint">A clip is a hit when rare-hash score and idf pass. Coverage and file-pause quiet are soft when those already look good. Lock needs two hits in a row plus the hold time.</p>
     <div class="setting-row">
       <label for="confirmHold">Hold match before lock</label>
       <input type="range" id="confirmHold" min="3000" max="10000" step="500" value="5000" />
@@ -804,8 +804,8 @@
     <button type="button" class="btn" id="btnForgetFingerprints" style="width:100%;margin-top:8px">Clear stored fingerprints</button>
   </details>
 
-  <p class="ver mono" id="appVer">v1.6.4 · 2026-08-20 23:15</p>
-  <p class="ver-note" id="appVerNote" hidden>Lock cleanup · playback transport only while playing · volume slider stays open while adjusting</p>
+  <p class="ver mono" id="appVer">v1.6.4 · 2026-08-21 20:35</p>
+  <p class="ver-note" id="appVerNote" hidden>v1.6.5 · Heard local bars · coverage soft when score/idf pass · near-miss keeps streak</p>
 
   <div class="bottom-bar">
     <p class="bottom-hint" id="mainBtnHint">Press to start tracking · Take Over when ready</p>
@@ -824,7 +824,7 @@
   <script>
     const $ = id => document.getElementById(id);
     const APP_VER = '1.6.4';
-    const APP_BUILD = '2026-08-20 23:15';
+    const APP_BUILD = '2026-08-21 20:35';
 
     const ENVELOPE_RATE = 20;
     const TRAIL_STEP_MS = 1000;
@@ -839,7 +839,7 @@
     const FILE_LOOKAHEAD_SEC = 0.8;
     const CONFIRM_GRACE_MS = 2500;
     const MIN_LOCK_CLIPS = 2;
-    const MIN_CLIP_COVERAGE = 0.28;
+    const MIN_CLIP_COVERAGE = 0.18;
     const MIN_CLIP_CONTRAST = 4;
     const MIN_GAP_SCORE = 0.62;
     const MAX_CLOCK_DRIFT = 1.25;
@@ -2487,13 +2487,21 @@
       if (found < needFound) {
         hard.push('only ' + found + ' clip hashes exist in the file (need ≥ ' + needFound + ')');
       }
-      // Allow lower coverage when score and idf are both very high — sparse-hash tracks.
-      const coverageFloor = (score >= 0.95 && result.hits >= needHits * 1.5)
-        ? MIN_CLIP_COVERAGE * 0.6
+      // Coverage: soft when core hash gates already pass (sparse / long tiles often sit ~15–25%).
+      const coverageFloor = (score >= 0.90 && result.hits >= needHits)
+        ? MIN_CLIP_COVERAGE * 0.7
         : MIN_CLIP_COVERAGE;
+      const coreOk =
+        score >= state.settings.matchThreshold &&
+        result.hits >= needHits &&
+        (result.contrast || 0) >= MIN_CLIP_CONTRAST &&
+        found >= needFound &&
+        (result.hashes || 0) >= 8;
       if (coverage < coverageFloor) {
-        hard.push('cover ' + Math.round(coverage * 100) + '% of matched hashes < ' +
-          Math.round(coverageFloor * 100) + '%');
+        const msg = 'cover ' + Math.round(coverage * 100) + '% of matched hashes < ' +
+          Math.round(coverageFloor * 100) + '%' + (coreOk ? ' (soft)' : '');
+        if (coreOk) soft.push(msg);
+        else hard.push(msg);
       }
       // Gaps are soft: room noise in pauses lowers confidence but does not veto a hit.
       if (result.gapUsable && result.gapScore < MIN_GAP_SCORE) {
@@ -2502,7 +2510,7 @@
       }
       if ((result.hashes || 0) < 8) hard.push('too few peaks in clip');
       const ok = hard.length === 0;
-      // Near-miss: close on hard gates (score almost there, or only coverage short).
+      // Near-miss: close on hard gates (score almost there, or only soft leftovers).
       const nearMiss = !ok && score >= state.settings.matchThreshold * 0.85 &&
         hard.length <= 2 &&
         !(result.hashes < 8);
@@ -2714,7 +2722,7 @@
       const scoreHits = Math.ceil(state.settings.matchThreshold * scoreNeedHits());
       return 'Hit needs score ≥ ' + state.settings.matchThreshold.toFixed(2) +
         ' (~' + scoreHits + ' rare hashes) · ≥ ' + needHits + ' idf · ×' + MIN_CLIP_CONTRAST +
-        ' contrast · ' + Math.round(MIN_CLIP_COVERAGE * 100) + '% of hashes that exist in the file · ' +
+        ' contrast · cover soft when score/idf pass (≥ ' + Math.round(MIN_CLIP_COVERAGE * 100) + '% preferred) · ' +
         'file pauses soft-checked (≥ ' + Math.round(MIN_GAP_SCORE * 100) + '% quiet preferred, blur ' +
         Math.round(state.settings.patternBlurMs) + ' ms) · ' +
         MIN_LOCK_CLIPS + ' clips in a row that follow the file clock · ' +
@@ -3230,8 +3238,7 @@
           Math.abs(result.offsetSec - lastHitOffset) < 10;
         const nearMiss = judged.nearMiss && nearPos;
         if (nearMiss) {
-          // Soft miss: keep some streak so one weak clip does not wipe a good lock path.
-          hitStreak = Math.max(0, hitStreak - 1);
+          // Soft miss: keep streak — do not wipe a good lock path on one weak clip.
           pushClipLog({
             kind: 'miss',
             at: Date.now(),
@@ -3892,17 +3899,15 @@
       const x0 = pts[0].x;
       const x1 = pts[pts.length - 1].x;
 
-      // Fill only under the actual sample span (not a triangle from the left edge).
       ctx.beginPath();
       ctx.moveTo(x0, h - pad);
       for (let i = 0; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
       ctx.lineTo(x1, h - pad);
       ctx.closePath();
       ctx.fillStyle = color || '#123c32';
-      ctx.globalAlpha = 0.28;
+      ctx.globalAlpha = 0.35;
       ctx.fill();
 
-      // Clean stroke along the envelope crest.
       ctx.beginPath();
       ctx.moveTo(pts[0].x, pts[0].y);
       for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
@@ -3915,33 +3920,48 @@
       ctx.globalAlpha = 1;
     }
 
-    function heardSeriesForView(viewStart, windowSec) {
-      // Prefer live recording bins; otherwise last finished clip.
-      if (clipCollecting && liveClipEnv.length) {
-        const xs = [];
-        const ys = [];
-        let peak = 0.0001;
-        // Map live bins across their real duration sitting at provisional file time.
-        const binSec = 4096 / (audioCtx ? audioCtx.sampleRate : 48000);
-        for (let i = 0; i < liveClipEnv.length; i++) {
-          xs.push(clipEnvFileAt + i * binSec - viewStart);
-          ys.push(liveClipEnv[i]);
-          if (liveClipEnv[i] > peak) peak = liveClipEnv[i];
-        }
-        return { xs, ys, peak, live: true };
+    // Heard lane: always draw the clip as a local full-width wave (never depends on file time).
+    function drawHeardWave(canvas, ys, color) {
+      const { w, h } = sizeFpCanvas(canvas);
+      const ctx = canvas.getContext('2d');
+      ctx.clearRect(0, 0, w, h);
+      if (!ys || ys.length < 2) return;
+      let peak = 0.0001;
+      for (let i = 0; i < ys.length; i++) if (ys[i] > peak) peak = ys[i];
+      const dpr = Math.min(2, window.devicePixelRatio || 1);
+      const pad = 4 * dpr;
+      const usable = h - pad * 2;
+      const n = ys.length;
+      const slot = w / n;
+      const barW = Math.max(1, slot * 0.72);
+      ctx.fillStyle = color || '#1b6b45';
+      for (let i = 0; i < n; i++) {
+        const amp = Math.max(0, Math.min(1, ys[i] / peak));
+        const bh = Math.max(2 * dpr, amp * usable);
+        const x = i * slot + (slot - barW) * 0.5;
+        ctx.globalAlpha = 0.55 + amp * 0.4;
+        ctx.fillRect(x, h - pad - bh, barW, bh);
       }
-      if (clipEnv && clipEnv.length) {
-        const xs = [];
-        const ys = [];
-        let peak = 0.0001;
-        for (let i = 0; i < clipEnv.length; i++) {
-          xs.push(clipEnvFileAt + i / ENVELOPE_RATE - viewStart);
-          ys.push(clipEnv[i]);
-          if (clipEnv[i] > peak) peak = clipEnv[i];
-        }
-        return { xs, ys, peak, live: false };
+      // Crest stroke for shape.
+      ctx.beginPath();
+      for (let i = 0; i < n; i++) {
+        const amp = Math.max(0, Math.min(1, ys[i] / peak));
+        const x = i * slot + slot * 0.5;
+        const y = h - pad - amp * usable;
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
       }
-      return { xs: [], ys: [], peak: 0.0001, live: false };
+      ctx.strokeStyle = color || '#1b6b45';
+      ctx.lineWidth = Math.max(1.5, 1.4 * dpr);
+      ctx.lineJoin = 'round';
+      ctx.globalAlpha = 1;
+      ctx.stroke();
+    }
+
+    function heardYsNow() {
+      if (clipCollecting && liveClipEnv.length) return liveClipEnv.slice();
+      if (clipEnv && clipEnv.length) return Array.from(clipEnv);
+      return null;
     }
 
     function drawViewportMarker(ctx, w, h, sec, windowSec, color) {
@@ -3974,42 +3994,6 @@
 
       const fileSeries = envelopeWindowSeries(fileEnvelope, viewStart, windowSec);
       const filePeak = fileSeries.peak;
-
-      let micXs = [];
-      let micYs = [];
-      let micPeak = 0.0001;
-      const heard = heardSeriesForView(viewStart, windowSec);
-      if (scrolling && (trackingLocked || hasAlign) && !clipCollecting && !heard.xs.length) {
-        const live = micLiveSeries(viewStart, windowSec);
-        micXs = live.xs;
-        micYs = live.ys;
-        micPeak = live.peak;
-      } else if (heard.xs.length) {
-        micXs = heard.xs;
-        micYs = heard.ys;
-        micPeak = heard.peak;
-      } else if (scrolling && (trackingLocked || hasAlign)) {
-        const live = micLiveSeries(viewStart, windowSec);
-        micXs = live.xs;
-        micYs = live.ys;
-        micPeak = live.peak;
-      }
-
-      // If the clip sits outside the view, fall back to a local full-width draw.
-      let micWindowSec = windowSec;
-      let localHeard = false;
-      if (micXs.length) {
-        const minX = Math.min(...micXs);
-        const maxX = Math.max(...micXs);
-        if (maxX < 0 || minX > windowSec) {
-          const span = Math.max(0.5, maxX - minX);
-          micXs = micXs.map(x => (x - minX));
-          micWindowSec = span;
-          localHeard = true;
-        }
-      }
-
-      const gain = Math.max(0.25, Math.min(8, filePeak / Math.max(micPeak, 0.0001)));
       const mark = scrolling
         ? view.playhead
         : (hasAlign ? (alignFileAt - view.origin) : null);
@@ -4021,31 +4005,37 @@
         drawViewportMarker(fileDraw.ctx, fileDraw.w, fileDraw.h, view.playheadBackup, windowSec, '#123c32');
       }
 
-      const micDraw = paintEnvelope(micCanvas, '#1b6b45', mark, windowSec);
-      const scaled = micYs.map(v => v * gain);
-      const micPeakDraw = localHeard ? Math.max(...scaled, 0.0001) : filePeak;
-      drawEnvelopeSeries(micDraw.ctx, micDraw.w, micDraw.h, micXs, scaled, micPeakDraw, micWindowSec, '#1b6b45');
-      if (mark != null && !localHeard) drawViewportMarker(micDraw.ctx, micDraw.w, micDraw.h, mark, windowSec, '#b54708');
+      // Heard: prefer the current clip as a full-width local wave so it never vanishes off-screen.
+      const heardYs = heardYsNow();
+      if (heardYs && heardYs.length >= 2) {
+        drawHeardWave(micCanvas, heardYs, '#1b6b45');
+      } else if (scrolling && (trackingLocked || hasAlign)) {
+        const live = micLiveSeries(viewStart, windowSec);
+        const micDraw = paintEnvelope(micCanvas, '#1b6b45', mark, windowSec);
+        const gain = Math.max(0.25, Math.min(8, filePeak / Math.max(live.peak, 0.0001)));
+        const scaled = live.ys.map(v => v * gain);
+        drawEnvelopeSeries(micDraw.ctx, micDraw.w, micDraw.h, live.xs, scaled, filePeak, windowSec, '#1b6b45');
+        if (mark != null) drawViewportMarker(micDraw.ctx, micDraw.w, micDraw.h, mark, windowSec, '#b54708');
+      } else {
+        paintEnvelope(micCanvas, '#1b6b45', mark, windowSec);
+      }
 
       const viewEnd = Math.min(dur, viewStart + windowSec);
       if (scrolling) {
         $('fpFileLabel').textContent = 'Track · ' + fmtTime(viewStart) + ' – ' + fmtTime(viewEnd);
-        if (clipCollecting) {
-          $('fpMicLabel').textContent = 'Heard · recording…';
-        } else if (clipEnv && clipEnv.length) {
-          $('fpMicLabel').textContent = 'Heard clip @ ' + fmtTime(clipEnvFileAt);
-        } else if (trackingLocked) {
-          $('fpMicLabel').textContent = 'Mic · live (follows amp)';
-        } else {
-          $('fpMicLabel').textContent = 'Mic · watching';
-        }
       } else {
         $('fpFileLabel').textContent = view.origin > 0.05
           ? ('Fingerprint from ' + fmtTime(view.origin))
           : 'File fingerprint';
-        $('fpMicLabel').textContent = clipCollecting
-          ? 'Heard · recording…'
-          : (clipEnv ? ('Heard clip @ ' + fmtTime(clipEnvFileAt)) : 'Heard clip (waiting)');
+      }
+      if (clipCollecting) {
+        $('fpMicLabel').textContent = 'Heard · recording…';
+      } else if (clipEnv && clipEnv.length) {
+        $('fpMicLabel').textContent = 'Heard clip @ ' + fmtTime(clipEnvFileAt);
+      } else if (trackingLocked) {
+        $('fpMicLabel').textContent = 'Mic · live (follows amp)';
+      } else {
+        $('fpMicLabel').textContent = 'Heard (waiting for clip)';
       }
 
       const alignBit = hasAlign ? (' · lined up @ ' + fmtTime(alignFileAt)) : '';
