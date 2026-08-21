@@ -804,7 +804,7 @@
     <button type="button" class="btn" id="btnForgetFingerprints" style="width:100%;margin-top:8px">Clear stored fingerprints</button>
   </details>
 
-  <p class="ver mono" id="appVer">v1.6.5 · 2026-08-21 20:38</p>
+  <p class="ver mono" id="appVer">v1.6.5 · 2026-08-21 21:14</p>
   <p class="ver-note" id="appVerNote" hidden>v1.6.5 · Heard local bars · coverage soft when score/idf pass · near-miss keeps streak</p>
 
   <div class="bottom-bar">
@@ -824,7 +824,7 @@
   <script>
     const $ = id => document.getElementById(id);
     const APP_VER = '1.6.5';
-    const APP_BUILD = '2026-08-21 20:38';
+    const APP_BUILD = '2026-08-21 21:14';
 
     const ENVELOPE_RATE = 20;
     const TRAIL_STEP_MS = 1000;
@@ -836,7 +836,7 @@
     const SHAPE_POINTS = 16;
     const MAX_MATCH_BURSTS = 12;
     const FILE_END_THRESHOLD = 0.97;
-    const FILE_LOOKAHEAD_SEC = 0.8;
+    const FILE_LOOKAHEAD_SEC = 0.45;
     const CONFIRM_GRACE_MS = 2500;
     const MIN_LOCK_CLIPS = 2;
     const MIN_CLIP_COVERAGE = 0.18;
@@ -846,6 +846,9 @@
     const CUTOUT_BLIP_MS = 1200;
     const CUTOUT_COOLDOWN_MS = 12000;
     const CUTOUT_FAIL_COOLDOWN_MS = 20000;
+    const CUTOUT_EDGE_PAD_SEC = 0.35; // ignore speech expected only at burst edges
+    const CLOCK_ARM_MS = 900; // wait for sustained amp audio before starting track clock
+    const PRELOCK_SEARCH_MAX_SEC = 60;
     const STRONG_LOCK_SCORE = 0.98;
     const STRONG_LOCK_COVERAGE = 0.55;
     const STRONG_LOCK_MIN_MS = 6000;
@@ -1012,6 +1015,10 @@
     let settingsLocked = false;
     let manualStartedAt = 0;
     let manualBaseSec = 0;
+    let manualClockPendingSince = null; // sustained audio before clock arms
+    let cutoutFiredAt = 0;
+    let cutoutAmpAt = 0;
+    let fileGapTable = []; // silence gaps between file bursts
     let manualTemplate = null;
     let manualWinStart = -1;
     let manualWinDur = 0;
@@ -1245,6 +1252,7 @@
       fileEnvelope = row.envelope;
       fileSpeechThreshold = row.thresh;
       fileBursts = extractBursts(fileEnvelope, fileSpeechThreshold);
+      rebuildFileGapTable();
       templateIndex = unpackTemplate(row);
       const origin = templateOriginSec();
       const fpStart = Math.max(0, Math.floor(origin * ENVELOPE_RATE));
@@ -1813,6 +1821,11 @@
       }
       if (state.mode === 'manual') {
         if (!trackingLocked) {
+          if (!manualStartedAt) {
+            return manualClockPendingSince
+              ? 'Amp heard — holding briefly before track clock starts…'
+              : 'Mic on · waiting for clear amp audio before starting the track clock';
+          }
           if (clipCollecting) return 'Tracking · recording clip near the expected file time…';
           if (confirmStartedAt) {
             return 'Tracking · matching ' + (confirmHeldMs / 1000).toFixed(1) + ' / ' +
@@ -1911,6 +1924,10 @@
         pill.classList.add('listening');
         if (state.analysing) {
           $('statusText').textContent = 'Starting tracking…';
+        } else if (!manualStartedAt) {
+          $('statusText').textContent = manualClockPendingSince
+            ? 'Hearing amp… arming clock'
+            : 'Waiting for amp audio…';
         } else if (trackingLocked) {
           const trailSec = Math.round(effectiveTrailMs() / 1000);
           $('statusText').textContent = 'Locked · ' + trailSec + ' s trail · Take Over when ready';
@@ -3092,10 +3109,32 @@
       clipEnvFileAt = Math.max(0, roomPosition());
     }
 
+    function maybeArmManualClock(heardSpeech) {
+      if (manualStartedAt || trackingLocked) return;
+      if (heardSpeech) {
+        if (!manualClockPendingSince) manualClockPendingSince = Date.now();
+        if (Date.now() - manualClockPendingSince >= CLOCK_ARM_MS) {
+          manualBaseSec = 0;
+          manualStartedAt = Date.now();
+          manualClockPendingSince = null;
+          pushClipLog({
+            kind: 'spot',
+            at: Date.now(),
+            line: 'CLOCK ARMED · amp audio held ' + (CLOCK_ARM_MS / 1000).toFixed(1) + 's · tracking from 0:00'
+          });
+          updateUI();
+        }
+      } else {
+        manualClockPendingSince = null;
+      }
+    }
+
     function beginClipIfNeeded(rms) {
       if (!isClipMatchMode() || state.analysing || clipCollecting || clipBusy) return;
       // After lock, only spot checks collect clips — regular matching is suppressed.
       if (state.mode === 'manual' && trackingLocked) return;
+      // Wait for the track clock to arm (decent amp signal) before matching.
+      if (state.mode === 'manual' && !manualStartedAt) return;
       // Live matching uses tiled search on the full decoded buffer — not the 30 s templateIndex.
       if (!fileBuffer) return;
       if (rms <= state.settings.silenceThreshold) return;
@@ -3277,16 +3316,20 @@
 
     function manualMatchWindow() {
       const center = roomPosition();
-      // Widen after repeated misses while the mic is clearly hearing something.
-      // Bias forward — amp is more likely ahead of the user clock than behind.
-      const widen = manualMissStreak >= MANUAL_WIDE_MISS_THRESH && ambientRms > 0;
-      const bwd = widen ? 15 : SEEK_RADIUS_SEC;
-      const fwd = widen ? SEEK_RADIUS_WIDE_SEC : SEEK_RADIUS_SEC;
-      const lo = Math.max(0, center - bwd);
-      const hiRaw = center + fwd;
+      // Pre-lock: allow up to ~60 s search; bias forward; seed from silence-gap table when possible.
+      const unlocked = !trackingLocked;
+      const gapSeed = unlocked ? bestGapSeedSec(recentMicGaps()) : null;
+      const widen = unlocked || (manualMissStreak >= MANUAL_WIDE_MISS_THRESH && ambientRms > 0);
+      const bwd = widen ? (unlocked ? 20 : 15) : SEEK_RADIUS_SEC;
+      const fwd = widen ? PRELOCK_SEARCH_MAX_SEC : SEEK_RADIUS_SEC;
+      const anchor = (gapSeed != null && unlocked)
+        ? gapSeed
+        : center;
+      const lo = Math.max(0, anchor - bwd);
+      const hiRaw = anchor + fwd;
       const cap = fileDuration || hiRaw;
       const hi = Math.min(cap, lo + SEEK_WINDOW_MAX * 2, hiRaw);
-      return { start: lo, dur: Math.max(8, hi - lo), center, wide: widen };
+      return { start: lo, dur: Math.max(8, hi - lo), center: anchor, wide: widen, gapSeed };
     }
 
     function applyManualMatch(samples, sampleRate, clipMs) {
@@ -4078,13 +4121,74 @@
 
     function fileExpectsSpeechAt(sec) {
       if (!fileBursts.length) return false;
-      const t0 = sec;
-      const t1 = sec + FILE_LOOKAHEAD_SEC;
+      // Require being solidly inside a burst — edge-only overlap causes false cutouts
+      // when the lock is only a fraction of a second early/late.
       for (let i = 0; i < fileBursts.length; i++) {
         const b = fileBursts[i];
-        if (b.end > t0 && b.start < t1) return true;
+        const solidStart = b.start + CUTOUT_EDGE_PAD_SEC;
+        const solidEnd = b.end - CUTOUT_EDGE_PAD_SEC;
+        if (solidEnd <= solidStart) {
+          if (sec >= b.start && sec < b.end) return true;
+          continue;
+        }
+        if (sec >= solidStart && sec < solidEnd) return true;
       }
       return false;
+    }
+
+    function rebuildFileGapTable() {
+      fileGapTable = [];
+      const bursts = fileBursts;
+      if (!bursts || bursts.length < 2) return;
+      for (let i = 0; i < bursts.length - 1; i++) {
+        const gap = bursts[i + 1].start - bursts[i].end;
+        if (gap < 0.12 || gap > 8) continue;
+        fileGapTable.push({
+          idx: fileGapTable.length,
+          afterEnd: bursts[i].end,
+          nextStart: bursts[i + 1].start,
+          gapSec: gap,
+          burstDur: bursts[i].dur,
+          nextDur: bursts[i + 1].dur
+        });
+      }
+    }
+
+    function bestGapSeedSec(micGaps) {
+      // Match a short sequence of mic inter-burst gaps against the file silence table.
+      if (!micGaps.length || !fileGapTable.length) return null;
+      const n = Math.min(micGaps.length, 4);
+      const needle = micGaps.slice(-n);
+      let best = null;
+      let bestErr = 1e9;
+      for (let i = 0; i <= fileGapTable.length - n; i++) {
+        let err = 0;
+        for (let k = 0; k < n; k++) {
+          const d = Math.abs(fileGapTable[i + k].gapSec - needle[k]);
+          err += d * d;
+        }
+        err = Math.sqrt(err / n);
+        if (err < bestErr) {
+          bestErr = err;
+          // Seed just after this gap cluster → next burst start
+          best = fileGapTable[i + n - 1].nextStart;
+        }
+      }
+      // Accept only reasonably tight gap matches
+      if (best == null || bestErr > 0.55) return null;
+      return best;
+    }
+
+    function recentMicGaps() {
+      const bursts = completedMicBursts || [];
+      if (bursts.length < 2) return [];
+      const gaps = [];
+      const start = Math.max(0, bursts.length - 5);
+      for (let i = start; i < bursts.length - 1; i++) {
+        const g = bursts[i + 1].start - bursts[i].end;
+        if (g >= 0.12 && g <= 8) gaps.push(g);
+      }
+      return gaps;
     }
 
     function roomPosition() {
@@ -4188,11 +4292,12 @@
         beginClipIfNeeded(rms);
         tickPrimedViz();
       } else if (state.mode === 'manual') {
+        const heardSpeech = rms > state.settings.silenceThreshold || !!liveBurst;
+        maybeArmManualClock(heardSpeech);
         beginClipIfNeeded(rms);
         const room = roomPosition();
         trackedPosition = backupPosition();
         fileExpectsSpeech = fileExpectsSpeechAt(room);
-        const heardSpeech = rms > state.settings.silenceThreshold || !!liveBurst;
         if (heardSpeech) lastSpeechAt = Date.now();
         noteUnexpectedSilence(fileExpectsSpeech, heardSpeech);
         if (heardSpeech && unexpectedSilenceMs === 0) inLogicalSync = true;
@@ -4336,14 +4441,15 @@
 
       if (backupAudio) backupAudio.pause();
       inLogicalSync = false;
-      // Halve strong-lock credit — position may be drifted; earn trust back after re-lock.
       strongLockMs = Math.max(0, strongLockMs * 0.5);
       cutoutRelockAttempts = 0;
       cutoutSpeechSince = null;
+      cutoutFiredAt = Date.now();
+      cutoutAmpAt = roomPosition();
       pushClipLog({
         kind: 'miss',
         at: Date.now(),
-        line: 'CUTOUT amp@' + fmtTime(roomPosition()) +
+        line: 'CUTOUT amp@' + fmtTime(cutoutAmpAt) +
           ' · silence ' + (unexpectedSilenceMs / 1000).toFixed(1) + 's' +
           ' · trigger ' + (cutoutTriggerMs() / 1000).toFixed(1) + 's' +
           ' · strong ' + (strongLockMs / 1000).toFixed(1) + 's'
@@ -4365,6 +4471,22 @@
       } else {
         cutoutSpeechSince = null;
       }
+    }
+
+    function applyCutoutSlip(quietSec) {
+      // Quiet while overlay was up while amp kept going ⇒ our clock was early.
+      // Slip amp lock backward by most of that quiet span (capped).
+      if (!trackingLocked || quietSec < 0.4) return 0;
+      const slip = Math.min(10, Math.max(0.4, quietSec * 0.9));
+      const nowRoom = roomPosition();
+      lockPositionSec = Math.max(0, nowRoom - slip);
+      lockClockAt = Date.now();
+      manualBaseSec = lockPositionSec;
+      manualStartedAt = Date.now();
+      alignFileAt = lockPositionSec;
+      alignPerfAt = performance.now() / 1000;
+      hasAlign = true;
+      return slip;
     }
 
     async function requestWakeLock() {
@@ -4475,7 +4597,10 @@
 
         state.analysing = false;
         manualBaseSec = 0;
-        manualStartedAt = Date.now();
+        manualStartedAt = 0; // arm only after sustained amp audio
+        manualClockPendingSince = null;
+        cutoutFiredAt = 0;
+        cutoutAmpAt = 0;
         renderTrackList();
         updateUI();
         if (!fileBuffer && track.file) {
@@ -4628,29 +4753,58 @@
       manualMissStreak = 0;
       confirmHeldMs = 0;
       trackedPosition = 0;
+      lockPositionSec = 0;
+      lockClockAt = 0;
+      manualStartedAt = 0;
+      manualBaseSec = 0;
+      manualClockPendingSince = null;
+      cutoutFiredAt = 0;
+      cutoutAmpAt = 0;
+      trackingLocked = false;
+      // Explicitly zero Amp / Backup UI (dual clocks can otherwise look stale).
+      const z = fmtTime(0);
+      if ($('timeRoom')) $('timeRoom').textContent = z;
+      if ($('timeBackup')) $('timeBackup').textContent = z;
+      if ($('timeCurrent')) $('timeCurrent').textContent = z;
+      if ($('progressFill')) $('progressFill').style.width = '0%';
+      if ($('progressRoomMark')) {
+        $('progressRoomMark').style.left = '0%';
+        $('progressRoomMark').hidden = true;
+      }
+      if ($('progressMetaDual')) $('progressMetaDual').hidden = true;
+      if ($('progressMetaSingle')) $('progressMetaSingle').hidden = false;
       updateProgressDisplay();
       updateUI();
       renderTriggerLog();
     }
 
     function dismissCutout(auto) {
+      const quietSec = cutoutFiredAt ? (Date.now() - cutoutFiredAt) / 1000 : 0;
+      let slip = 0;
+      if (auto && quietSec >= 0.4) slip = applyCutoutSlip(quietSec);
       pushClipLog({
         kind: 'spot',
         at: Date.now(),
         line: (auto ? 'AUTO KEEP LISTENING' : 'KEEP LISTENING') +
-          ' amp@' + fmtTime(roomPosition()) + ' · tracking resumed'
+          ' amp@' + fmtTime(roomPosition()) +
+          (slip ? (' · slip −' + slip.toFixed(1) + 's (quiet ' + quietSec.toFixed(1) + 's)') : '') +
+          ' · tracking resumed'
       });
       unexpectedSilenceMs = 0;
       micSpeechStartedAt = null;
       silenceSince = null;
       cutoutSpeechSince = null;
+      cutoutFiredAt = 0;
+      cutoutAmpAt = 0;
       lastSpeechAt = Date.now();
       inLogicalSync = true;
       cutoutVerifyPending = false;
       cutoutVerifyStartedAt = 0;
       cutoutRelockAttempts = 0;
       cutoutCooldownUntil = Date.now() + CUTOUT_COOLDOWN_MS;
-      lastSpotStatus = auto ? 'audio returned · listening again' : 'tracking resumed';
+      lastSpotStatus = auto
+        ? (slip ? ('audio returned · slipped −' + slip.toFixed(1) + 's') : 'audio returned · listening again')
+        : 'tracking resumed';
       setMode('manual');
       if (!listenTimer) listenTimer = setInterval(tickListen, LISTEN_MS);
       updateUI();

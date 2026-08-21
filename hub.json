@@ -1,7 +1,7 @@
 {
   "id": "audio-backup-helper",
   "title": "Back Me Up",
-  "version": "1.6.5",
+  "version": "1.6.6",
   "desc": "Arm a backup audio track, listen via mic, and take over instantly if the main amplifier cuts out. Audio stays on device.",
   "icon": "icon.svg",
   "iconPath": "icon.svg",
@@ -22,6 +22,11 @@
     "fingerprint"
   ],
   "changelog": [
+    {
+      "version": "1.6.6",
+      "date": "2026-08-21",
+      "notes": "Delay clock until amp audio; cutout slip on auto-resume; silence-gap search seed; Reset zeros Amp/Backup; softer edge cutouts"
+    },
     {
       "version": "1.6.5",
       "date": "2026-08-21",
