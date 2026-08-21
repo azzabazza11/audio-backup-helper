@@ -810,7 +810,7 @@
     <button type="button" class="btn" id="btnForgetFingerprints" style="width:100%;margin-top:8px">Clear stored fingerprints</button>
   </details>
 
-  <p class="ver mono" id="appVer">v1.6.16 · 2026-08-22 00:03</p>
+  <p class="ver mono" id="appVer">v1.6.16 · 2026-08-22 00:09</p>
   <p class="ver-note" id="appVerNote" hidden>v1.6.5 · Heard local bars · coverage soft when score/idf pass · near-miss keeps streak</p>
 
   <div class="bottom-bar">
@@ -829,8 +829,8 @@
 
   <script>
     const $ = id => document.getElementById(id);
-    const APP_VER = '1.6.19';
-    const APP_BUILD = '2026-08-22 00:03';
+    const APP_VER = '1.6.20';
+    const APP_BUILD = '2026-08-22 00:09';
 
     const ENVELOPE_RATE = 20;
     const TRAIL_STEP_MS = 1000;
@@ -1040,6 +1040,8 @@
     let logCounter = 0;
     let lockReason = '';
     let lastClipPerfStart = 0;
+    let lastClipPerfEnd = 0; // when last sample arrived (finishClip)
+    let lastClipDurationSec = 0;
     let alignPerfAt = 0;
     let alignFileAt = 0;
     let hasAlign = false;
@@ -3208,6 +3210,8 @@
       burstSilenceSince = 0;
       liveClipEnv = [];
       lastClipPerfStart = performance.now() / 1000;
+      lastClipPerfEnd = 0;
+      lastClipDurationSec = 0;
       // Prepend pre-roll so we capture from burst start, not mid-word.
       if (prerollBuf && prerollHead > 0) {
         const len = prerollBuf.length;
@@ -3228,6 +3232,22 @@
       }
       // Provisional placement near the user clock so Heard is visible before match.
       clipEnvFileAt = Math.max(0, roomPosition());
+    }
+
+    // File time "now" from a match: samples map to [offset, offset+dur]; wall has
+    // already moved past the last sample by `age` (match + setTimeout delay).
+    function matchedAmpNowSec(offsetSec, clipMs) {
+      const clipSec = clipMs != null ? clipMs / 1000 : lastClipDurationSec;
+      const dur = clipSec > 0 ? clipSec : lastClipDurationSec;
+      const endPerf = lastClipPerfEnd > 0 ? lastClipPerfEnd : performance.now() / 1000;
+      const age = Math.max(0, performance.now() / 1000 - endPerf);
+      return Math.max(0, (offsetSec || 0) + dur + age);
+    }
+
+    function matchedClipStartPerf() {
+      const dur = lastClipDurationSec > 0 ? lastClipDurationSec : 0;
+      const endPerf = lastClipPerfEnd > 0 ? lastClipPerfEnd : performance.now() / 1000;
+      return endPerf - dur;
     }
 
     function maybeArmManualClock(heardSpeech) {
@@ -3618,9 +3638,12 @@
       clipLength = 0;
       liveClipEnv = [];
       const clipMs = collected / sr * 1000;
+      lastClipDurationSec = collected / sr;
+      lastClipPerfEnd = performance.now() / 1000;
       // Always show Heard immediately — even if matching later fails or finds nothing.
       clipEnv = envelopeFromPcm(samples, sr);
-      clipEnvFileAt = Math.max(0, roomPosition());
+      // Provisional: place clip start so its end sits at current room (until match).
+      clipEnvFileAt = Math.max(0, roomPosition() - lastClipDurationSec);
       const wasSpot = spotMode;
       const wasMicro = microAlignMode;
       const wasCutoutVerify = cutoutVerifyMode;
@@ -3667,7 +3690,8 @@
         );
       }
       if (judged.ok && hitStreak >= 1 && lastHitPerf) {
-        const dtWall = lastClipPerfStart - lastHitPerf;
+        const clipStartPerf = matchedClipStartPerf();
+        const dtWall = clipStartPerf - lastHitPerf;
         const dtFile = result.offsetSec - lastHitOffset;
         const drift = Math.abs(dtFile - dtWall);
         clockNote = ' file+' + dtFile.toFixed(1) + 's wall+' + dtWall.toFixed(1) + 's drift ' + drift.toFixed(1) + 's';
@@ -3704,25 +3728,33 @@
         confirmBadSince = null;
         hitStreak += 1;
         manualMissStreak = 0;
+        const clipStartPerf = matchedClipStartPerf();
+        const nowFile = matchedAmpNowSec(result.offsetSec, clipMs);
         lastHitOffset = result.offsetSec;
-        lastHitPerf = lastClipPerfStart;
-        lastGoodOffset = result.offsetSec;
-        lastGoodPerf = lastClipPerfStart;
+        lastHitPerf = clipStartPerf;
+        lastGoodOffset = nowFile;
+        lastGoodPerf = performance.now() / 1000;
+        // Snap amp clock to match-start + clip length + match delay — not a bare
+        // offset+duration stamped at Date.now() with a free-running pre-lock clock.
+        slipAmpClock(nowFile);
         hasAlign = true;
-        alignPerfAt = lastClipPerfStart;
         alignFileAt = result.offsetSec;
+        alignPerfAt = clipStartPerf;
+        clipEnvFileAt = result.offsetSec;
         if (!confirmStartedAt) {
           confirmStartedAt = now;
           confirmHeldMs = 0;
         }
         confirmHeldMs += clipMs;
-        confirmPositionSec = result.offsetSec + clipMs / 1000;
+        confirmPositionSec = nowFile;
         pushClipLog({
           kind: 'hit',
           at: Date.now(),
           line: (state.mode === 'seeking' ? 'SEEK HIT ' : state.mode === 'manual' ? 'MAN HIT ' : 'HIT  ') + base +
             ' · streak ' + hitStreak + '/' + MIN_LOCK_CLIPS +
-            ' · hold ' + (confirmHeldMs / 1000).toFixed(1) + 's'
+            ' · hold ' + (confirmHeldMs / 1000).toFixed(1) + 's' +
+            ' · now@' + fmtTime(nowFile) +
+            ' (clip ' + (clipMs / 1000).toFixed(1) + 's from ' + fmtTime(result.offsetSec) + ')'
         });
         castAmpElection(result.offsetSec, result.score, 'hit');
         const enoughClips = hitStreak >= MIN_LOCK_CLIPS;
@@ -3734,7 +3766,7 @@
             at: Date.now(),
             line: (state.mode === 'seeking' ? 'SEEK LOCK ' : state.mode === 'manual' ? 'MAN LOCK ' : 'LOCK ') + lockReason
           });
-          activateSync(confirmPositionSec, 0);
+          activateSync(nowFile, 0);
           return;
         }
       } else {
@@ -4757,11 +4789,23 @@
       drawFineTuneMarkers(fileDraw.ctx, fileDraw.w, fileDraw.h, viewStart, windowSec);
 
       // Heard under Track:
-      // - spot mode between checks → rolling live mic, time-synced for comparison
-      // - micro-align / active clip → show the recorded clip wave
-      const preferLiveRoll = trackingLocked && lockConfidenceOk() && !clipCollecting && !microAlignMode;
+      // Prefer time-aligned clip overlay after a match so clip length lines up with Track.
+      // Spot-mode live roll only when we are not showing a fresh matched clip.
+      const overlay = (clipEnv && clipEnv.length >= 2 && scrolling)
+        ? clipOverlaySeries(viewStart)
+        : null;
+      const preferLiveRoll = trackingLocked && lockConfidenceOk() && !clipCollecting &&
+        !microAlignMode && !(overlay && overlay.xs.length >= 2);
       const heardYs = preferLiveRoll ? null : heardYsNow();
-      if (heardYs && heardYs.length >= 2) {
+      if (overlay && overlay.xs.length >= 2) {
+        const micDraw = paintEnvelope(micCanvas, '#1b6b45', mark, windowSec);
+        drawEnvelopeSeries(micDraw.ctx, micDraw.w, micDraw.h, overlay.xs, overlay.ys, displayPeak, windowSec, '#1b6b45');
+        if (mark != null) drawViewportMarker(micDraw.ctx, micDraw.w, micDraw.h, mark, windowSec, '#b54708');
+        // Clip span: start tick + end tick so length vs playhead is obvious.
+        const clipDur = clipEnv.length / ENVELOPE_RATE;
+        drawFineTuneTick(micDraw.ctx, micDraw.w, micDraw.h, clipEnvFileAt - viewStart, windowSec, '#2a6f97', false);
+        drawFineTuneTick(micDraw.ctx, micDraw.w, micDraw.h, clipEnvFileAt + clipDur - viewStart, windowSec, '#2a6f97', true);
+      } else if (heardYs && heardYs.length >= 2) {
         drawHeardWave(micCanvas, heardYs, '#1b6b45', displayPeak);
       } else if (scrolling && (trackingLocked || hasAlign)) {
         const live = micLiveSeries(viewStart, windowSec);
@@ -4793,10 +4837,12 @@
         $('fpMicLabel').textContent = 'Heard · live (synced under track) · spot mode';
       } else if (clipEnv && clipEnv.length) {
         const conf = Math.round(lastMatchScore * 100);
+        const clipDur = clipEnv.length / ENVELOPE_RATE;
         $('fpMicLabel').textContent = trackingLocked
-          ? ('Heard clip @ ' + fmtTime(clipEnvFileAt) + ' · ' + conf + '%' +
-            (lockConfidenceOk() ? ' · spot mode' : ' · micro-align'))
-          : ('Heard clip @ ' + fmtTime(clipEnvFileAt));
+          ? ('Heard clip @ ' + fmtTime(clipEnvFileAt) + '–' + fmtTime(clipEnvFileAt + clipDur) +
+            ' · ' + conf + '%' +
+            (lockConfidenceOk() ? ' · lined under track' : ' · micro-align'))
+          : ('Heard clip @ ' + fmtTime(clipEnvFileAt) + '–' + fmtTime(clipEnvFileAt + clipDur));
       } else if (trackingLocked) {
         $('fpMicLabel').textContent = 'Heard · waiting for next clip';
       } else {
@@ -5446,8 +5492,16 @@
       resetConfirmHold();
       inLogicalSync = true;
       hasAlign = true;
-      alignPerfAt = performance.now() / 1000;
-      alignFileAt = roomNow;
+      // Anchor align at matched clip START so Heard spans [start, start+dur] under Track;
+      // amp clock (roomNow) is start + clip length + match age — playhead sits at "now".
+      if (lastClipDurationSec > 0 && clipEnvFileAt >= 0 &&
+          Math.abs((clipEnvFileAt + lastClipDurationSec) - roomNow) < 2.5) {
+        alignFileAt = clipEnvFileAt;
+        alignPerfAt = matchedClipStartPerf();
+      } else {
+        alignPerfAt = performance.now() / 1000;
+        alignFileAt = roomNow;
+      }
       spotChecksDone = 0;
       spotWeakStreak = 0;
       nextSpotAt = Date.now() + SPOT_WAIT_MS;
