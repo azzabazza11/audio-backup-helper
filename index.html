@@ -804,7 +804,7 @@
     <button type="button" class="btn" id="btnForgetFingerprints" style="width:100%;margin-top:8px">Clear stored fingerprints</button>
   </details>
 
-  <p class="ver mono" id="appVer">v1.6.10 · 2026-08-21 22:12</p>
+  <p class="ver mono" id="appVer">v1.6.11 · 2026-08-21 22:24</p>
   <p class="ver-note" id="appVerNote" hidden>v1.6.5 · Heard local bars · coverage soft when score/idf pass · near-miss keeps streak</p>
 
   <div class="bottom-bar">
@@ -823,8 +823,8 @@
 
   <script>
     const $ = id => document.getElementById(id);
-    const APP_VER = '1.6.10';
-    const APP_BUILD = '2026-08-21 22:12';
+    const APP_VER = '1.6.11';
+    const APP_BUILD = '2026-08-21 22:24';
 
     const ENVELOPE_RATE = 20;
     const TRAIL_STEP_MS = 1000;
@@ -880,7 +880,8 @@
     const FP_BIN_Q = 3;
     const FP_HOP_SEC = FP_HOP / FP_SR;
     const SPOT_WAIT_MS = 60000;
-    const LOCK_CONFIDENCE_OK = 0.95; // ≥95% → spot checks only; below → micro-align
+    const LOCK_CONFIDENCE_OK = 0.95; // ≥95% → spot checks only
+    const LOCK_DROP_SCORE = 0.90; // while locked, below this → drop lock (be honest)
     const MICRO_CLIP_MIN_SEC = 1.0;
     const MICRO_CLIP_MAX_SEC = 2.0;
     const MICRO_ALIGN_RADIUS_SEC = 3.5;
@@ -888,9 +889,10 @@
     const MICRO_SLIP_MIN_SEC = 0.08;
     const MICRO_WIDE_SCORE = 0.85; // below this, widen hunt; allow micro in file silence
     const SILENT_TRACK_GAP_SEC = 10; // enter silent-marker mode on gaps this long+
-    const SILENT_TRACK_SCORE = 0.85; // only when confidence is below this
+    const SILENT_TRACK_SCORE = 0.90; // use silent markers when confidence is below this (unlocked re-acquire)
     const SILENT_TRACK_MIC_MIN_SEC = 2.5; // mic must be quiet this long before arming for burst
     const SILENT_TRACK_SEARCH_SEC = 90; // look this far for a matching long gap
+    const SILENT_TRACK_COOLDOWN_MS = 45000; // don't re-snap the same gap immediately
     const INTRO_SILENCE_SKIP_MAX = 12; // seed clock / search past leading track silence
     const VIZ_DB_FLOOR = -42; // shared dB floor for track + heard comparison
     const SEEK_STEP_SEC = 10;
@@ -1026,6 +1028,8 @@
     let silentTrackQuietSince = null;
     let silentTrackWasSpeech = false;
     let silentTrackGap = null; // { afterEnd, nextStart, gapSec }
+    let silentTrackCooldownUntil = 0;
+    let silentTrackLastSnapSec = -1; // last snapped burst — don't reuse until past it
     let spotFileStart = 0;
     let spotChecksDone = 0;
     let nextSpotAt = 0;
@@ -1856,6 +1860,13 @@
               ? 'Amp heard — holding briefly before track clock starts…'
               : 'Mic on · waiting for clear amp audio before starting the track clock';
           }
+          if (silentTrackMode) {
+            return silentTrackArmed
+              ? 'Unlocked · silent track · waiting for burst marker…'
+              : ('Unlocked · silent track · gap ' +
+                (silentTrackGap ? silentTrackGap.gapSec.toFixed(1) + 's' : '…') +
+                ' → ' + (silentTrackGap ? fmtTime(silentTrackGap.nextStart) : ''));
+          }
           if (clipCollecting) return 'Tracking · recording clip near the expected file time…';
           if (confirmStartedAt) {
             return 'Tracking · matching ' + (confirmHeldMs / 1000).toFixed(1) + ' / ' +
@@ -1866,11 +1877,8 @@
           return 'Tracking · listening for local match · trail preset ' + fmtTrailMs(effectiveTrailMs());
         }
         let line = 'Tracking · trail measured ' + fmtTrailMs(effectiveTrailMs());
-        if (silentTrackMode) {
-          line += silentTrackArmed
-            ? ' · silent track · waiting for burst marker'
-            : (' · silent track · gap ' +
-              (silentTrackGap ? silentTrackGap.gapSec.toFixed(1) + 's' : '…'));
+        if (!lockHoldOk()) {
+          line += ' · confidence soft · may drop lock';
         } else if (!lockConfidenceOk()) {
           line += ' · micro-align ' + Math.round(lastMatchScore * 100) + '% → 95%';
           if (clipCollecting && microAlignMode) line += ' · recording 1–2s clip…';
@@ -3199,6 +3207,9 @@
       if (state.mode === 'manual' && trackingLocked) return;
       // Wait for the track clock to arm (decent amp signal) before matching.
       if (state.mode === 'manual' && !manualStartedAt) return;
+      // While armed for a silence-burst marker, don't burn clips on quiet.
+      if (silentTrackMode && silentTrackArmed && rms <= state.settings.silenceThreshold) return;
+      if (silentTrackMode && !silentTrackArmed) return;
       // Live matching uses tiled search on the full decoded buffer — not the 30 s templateIndex.
       if (!fileBuffer) return;
       if (rms <= state.settings.silenceThreshold) return;
@@ -3209,6 +3220,56 @@
 
     function lockConfidenceOk() {
       return lastMatchScore >= LOCK_CONFIDENCE_OK;
+    }
+
+    function lockHoldOk() {
+      return lastMatchScore >= LOCK_DROP_SCORE;
+    }
+
+    // Honest unlock: low / swinging confidence means alignment is wrong — search again.
+    function dropLock(reason) {
+      if (!trackingLocked) return;
+      const room = roomPosition();
+      trackingLocked = false;
+      strongLockMs = 0;
+      resetConfirmHold();
+      resetSilentTrack();
+      manualBaseSec = room;
+      manualStartedAt = Date.now();
+      lockPositionSec = 0;
+      lockClockAt = 0;
+      lastGoodOffset = room;
+      lastGoodPerf = performance.now() / 1000;
+      hasAlign = true;
+      alignFileAt = room;
+      alignPerfAt = performance.now() / 1000;
+      inLogicalSync = false;
+      lockReason = '';
+      lastSpotStatus = 'lock dropped · searching again';
+      nextMicroAt = 0;
+      nextSpotAt = 0;
+      pushClipLog({
+        kind: 'miss',
+        at: Date.now(),
+        line: 'LOCK DROP · ' + reason + ' · amp@' + fmtTime(room) + ' · searching again'
+      });
+      if (state.mode === 'armed' || state.mode === 'backing') setMode('manual');
+      else setMode('manual');
+      updateUI();
+    }
+
+    // After spot/micro updates lastMatchScore — drop lock if confidence fell.
+    function notePostLockConfidence(score, source) {
+      if (!trackingLocked) return false;
+      lastMatchScore = score;
+      if (score < LOCK_DROP_SCORE) {
+        dropLock(
+          (source || 'confidence') + ' ' + Math.round(score * 100) +
+          '% < ' + Math.round(LOCK_DROP_SCORE * 100) + '%'
+        );
+        return true;
+      }
+      return false;
     }
 
     // Adaptive hunt radius: mid confidence (~70%) can still be ~10s off — widen.
@@ -3266,7 +3327,7 @@
       return out;
     }
 
-    // Prefer a long gap we're inside, else one coming up / nearby while confidence is low.
+    // Prefer a long gap we're inside or approaching — never one whose burst we already passed.
     function longSilenceCandidate(sec) {
       const gaps = findLongFileGaps(SILENT_TRACK_GAP_SEC);
       if (!gaps.length) return null;
@@ -3274,11 +3335,15 @@
       let bestScore = 1e9;
       for (let i = 0; i < gaps.length; i++) {
         const g = gaps[i];
+        // Already at/past this gap's burst — don't keep snapping it (log #2 loop).
+        if (sec >= g.nextStart - 0.35) continue;
+        if (silentTrackLastSnapSec >= 0 && Math.abs(g.nextStart - silentTrackLastSnapSec) < 0.05) {
+          if (Date.now() < silentTrackCooldownUntil) continue;
+        }
         const dist = sec < g.afterEnd
           ? g.afterEnd - sec
-          : (sec > g.nextStart ? sec - g.nextStart : 0);
+          : (sec < g.nextStart ? 0 : sec - g.nextStart);
         if (dist > SILENT_TRACK_SEARCH_SEC) continue;
-        // Prefer being inside the gap, then longer gaps, then nearer ones.
         const inside = sec >= g.afterEnd && sec < g.nextStart ? 0 : 1;
         const rank = inside * 1000 + dist - Math.min(30, g.gapSec) * 0.01;
         if (rank < bestScore) {
@@ -3297,15 +3362,18 @@
       silentTrackGap = null;
     }
 
+    // Silent markers help re-acquire after unlock (or while unlocked mid-search).
     function maybeEnterSilentTrack() {
-      if (!trackingLocked || lockConfidenceOk()) {
+      if (trackingLocked) {
         if (silentTrackMode) resetSilentTrack();
         return;
       }
-      if ((lastMatchScore || 0) >= SILENT_TRACK_SCORE) {
+      if ((lastMatchScore || 0) >= SILENT_TRACK_SCORE && lastGoodPerf) {
+        // Fresh high score while searching — no need for markers.
         if (silentTrackMode) resetSilentTrack();
         return;
       }
+      if (Date.now() < silentTrackCooldownUntil && !silentTrackMode) return;
       const room = roomPosition();
       const gap = longSilenceCandidate(room);
       if (!gap) {
@@ -3324,19 +3392,15 @@
         pushClipLog({
           kind: 'spot',
           at: Date.now(),
-          line: 'SILENT TRACK ON · conf ' + Math.round((lastMatchScore || 0) * 100) +
+          line: 'SILENT TRACK ON · unlocked · conf ' + Math.round((lastMatchScore || 0) * 100) +
             '% · file gap ' + gap.gapSec.toFixed(1) + 's · next burst @' + fmtTime(gap.nextStart)
         });
       }
     }
 
-    // Both sides in a long silence → next amp burst is the marker; snap to file burst after gap.
+    // Both sides in a long silence → next amp burst is the marker; snap clock to file burst.
     function tickSilentTrack(rms) {
-      if (!silentTrackMode || !silentTrackGap || !trackingLocked) return false;
-      if (lockConfidenceOk() || (lastMatchScore || 0) >= SILENT_TRACK_SCORE) {
-        resetSilentTrack();
-        return false;
-      }
+      if (!silentTrackMode || !silentTrackGap || trackingLocked) return false;
       const gate = state.settings.silenceThreshold;
       const heard = rms > gate;
       const now = Date.now();
@@ -3344,9 +3408,8 @@
       if (!heard) {
         if (!silentTrackQuietSince) silentTrackQuietSince = now;
         const quietSec = (now - silentTrackQuietSince) / 1000;
-        // Need a solid quiet stretch (and ideally approaching the long file gap length).
         const need = Math.min(
-          Math.max(SILENT_TRACK_MIC_MIN_SEC, silentTrackGap.gapSec * 0.35),
+          Math.max(SILENT_TRACK_MIC_MIN_SEC, silentTrackGap.gapSec * 0.45),
           silentTrackGap.gapSec * 0.95
         );
         if (!silentTrackArmed && quietSec >= need) {
@@ -3361,10 +3424,9 @@
           updateUI();
         }
         silentTrackWasSpeech = false;
-        return true; // hold micro-align while tracking silence
+        return true;
       }
 
-      // Speech: if armed after long quiet, this onset is the marker.
       if (silentTrackArmed && !silentTrackWasSpeech) {
         const quietSec = silentTrackQuietSince
           ? (now - silentTrackQuietSince) / 1000
@@ -3373,54 +3435,54 @@
         const room = roomPosition();
         let best = silentTrackGap;
         let bestErr = 1e9;
-        // Match mic quiet length to file gap length within search window.
         for (let i = 0; i < gaps.length; i++) {
           const g = gaps[i];
+          if (room >= g.nextStart - 0.35) continue;
           if (Math.abs(g.nextStart - room) > SILENT_TRACK_SEARCH_SEC &&
               Math.abs(g.afterEnd - room) > SILENT_TRACK_SEARCH_SEC) continue;
           const err = Math.abs(g.gapSec - quietSec);
-          // Prefer longer gaps when quiet durations are similar.
           const rank = err - Math.min(20, g.gapSec) * 0.02;
           if (rank < bestErr) {
             bestErr = rank;
             best = g;
           }
         }
-        // Accept if quiet length is in the ballpark of the gap (or gap is clearly long).
         const okMatch = quietSec >= SILENT_TRACK_MIC_MIN_SEC &&
-          (bestErr < Math.max(3, best.gapSec * 0.45) || quietSec >= SILENT_TRACK_GAP_SEC * 0.7);
+          best &&
+          (bestErr < Math.max(2.5, best.gapSec * 0.35) || quietSec >= best.gapSec * 0.55);
         if (okMatch && best) {
           slipAmpClock(best.nextStart);
-          lastMatchScore = Math.max(lastMatchScore || 0, 0.72);
+          lastGoodOffset = best.nextStart;
+          lastGoodPerf = performance.now() / 1000;
+          silentTrackLastSnapSec = best.nextStart;
+          silentTrackCooldownUntil = now + SILENT_TRACK_COOLDOWN_MS;
           lastSpotStatus = 'silent marker · snapped @' + fmtTime(best.nextStart) +
             ' · quiet ' + quietSec.toFixed(1) + 's ≈ gap ' + best.gapSec.toFixed(1) + 's';
           pushClipLog({
-            kind: 'lock',
+            kind: 'spot',
             at: now,
             line: 'SILENT MARKER · snap amp→' + fmtTime(best.nextStart) +
               ' · mic quiet ' + quietSec.toFixed(1) + 's · file gap ' + best.gapSec.toFixed(1) + 's' +
-              (bestErr < 50 ? (' · Δ' + bestErr.toFixed(1) + 's') : '')
+              (bestErr < 50 ? (' · Δ' + bestErr.toFixed(1) + 's') : '') +
+              ' · wait for lock hits'
           });
           resetSilentTrack();
-          nextMicroAt = 0; // immediately fine-tune with a clip after the burst
+          nextMicroAt = 0;
           updateUI();
-          return true;
+          return false; // allow clip matching to confirm lock
         }
       }
       silentTrackWasSpeech = true;
       silentTrackQuietSince = null;
-      // Still in silent-track mode but burst didn't qualify — stay for another quiet cycle.
       return silentTrackMode;
     }
 
     function maybeMicroAlign(rms) {
       if ((state.mode !== 'armed' && state.mode !== 'manual') || !trackingLocked || !fileBuffer) return;
       if (lockConfidenceOk()) return;
-      // While silent-tracking a long gap, wait for the burst marker instead of micro clips.
       if (silentTrackMode) return;
       if (clipCollecting || clipBusy) return;
       if (Date.now() < nextMicroAt) return;
-      // Low confidence: keep hunting even through file silence (clock may be sitting in a gap).
       if (!fileExpectsSpeech && lastMatchScore >= MICRO_WIDE_SCORE) return;
       if (rms <= state.settings.silenceThreshold) return;
       microAlignMode = true;
@@ -3853,6 +3915,7 @@
           (lockConfidenceOk() ? ' · ≥95% → spot checks' : (improved && !slipped ? ' · score↑ hold' : ''))
       });
       lastClipStatus = judged.ok || judged.nearMiss || improved ? 'hit' : 'miss';
+      if (notePostLockConfidence(result.score, 'micro')) return;
       lastSpotStatus = lockConfidenceOk()
         ? ('micro OK · ' + confPct + '% · switching to spot checks')
         : ('micro · ' + confPct + '%' +
@@ -3861,7 +3924,6 @@
       if (lockConfidenceOk()) {
         nextSpotAt = Date.now() + Math.min(SPOT_WAIT_MS, 15000);
       } else if (!slipped && prevScore < MICRO_WIDE_SCORE) {
-        // Still mid/low — keep pressure on with a quicker follow-up.
         nextMicroAt = Date.now() + 1000;
       }
       updateUI();
@@ -3909,9 +3971,12 @@
         at: Date.now(),
         line: (good ? 'SPOT OK  ' : 'SPOT WEAK ') + base + failBit
       });
+      if (notePostLockConfidence(result.score, good ? 'spot' : 'spot weak')) {
+        return;
+      }
       lastSpotStatus = good
         ? ('spot #' + spotChecksDone + ' OK')
-        : ('spot #' + spotChecksDone + ' weak · still locked');
+        : ('spot #' + spotChecksDone + ' weak');
       updateUI();
     }
 
@@ -4767,10 +4832,11 @@
         noteUnexpectedSilence(fileExpectsSpeech, heardSpeech);
         if (heardSpeech && unexpectedSilenceMs === 0) inLogicalSync = true;
         if (trackingLocked) {
-          maybeEnterSilentTrack();
-          const holdingSilent = tickSilentTrack(rms);
           if (lockConfidenceOk()) maybeSpotCheck(rms);
-          else if (!holdingSilent) maybeMicroAlign(rms);
+          else maybeMicroAlign(rms);
+        } else {
+          maybeEnterSilentTrack();
+          tickSilentTrack(rms);
         }
         checkCutout();
         tickPrimedViz();
@@ -4784,10 +4850,8 @@
         beginClipIfNeeded(rms);
         tickPrimedViz();
       } else if (state.mode === 'armed') {
-        maybeEnterSilentTrack();
-        const holdingSilent = tickSilentTrack(rms);
         if (lockConfidenceOk()) maybeSpotCheck(rms);
-        else if (!holdingSilent) maybeMicroAlign(rms);
+        else maybeMicroAlign(rms);
         tickArmed(rms);
       }
 
@@ -5134,6 +5198,8 @@
       nextMicroAt = 0;
       vizDisplayPeak = 0;
       resetSilentTrack();
+      silentTrackCooldownUntil = 0;
+      silentTrackLastSnapSec = -1;
       lastSpotStatus = '';
       state.analysing = false;
 
