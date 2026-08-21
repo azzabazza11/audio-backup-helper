@@ -804,7 +804,7 @@
     <button type="button" class="btn" id="btnForgetFingerprints" style="width:100%;margin-top:8px">Clear stored fingerprints</button>
   </details>
 
-  <p class="ver mono" id="appVer">v1.6.7 · 2026-08-21 21:24</p>
+  <p class="ver mono" id="appVer">v1.6.8 · 2026-08-21 21:31</p>
   <p class="ver-note" id="appVerNote" hidden>v1.6.5 · Heard local bars · coverage soft when score/idf pass · near-miss keeps streak</p>
 
   <div class="bottom-bar">
@@ -823,8 +823,8 @@
 
   <script>
     const $ = id => document.getElementById(id);
-    const APP_VER = '1.6.7';
-    const APP_BUILD = '2026-08-21 21:24';
+    const APP_VER = '1.6.8';
+    const APP_BUILD = '2026-08-21 21:31';
 
     const ENVELOPE_RATE = 20;
     const TRAIL_STEP_MS = 1000;
@@ -884,6 +884,8 @@
     const MICRO_ALIGN_RADIUS_SEC = 3.5;
     const MICRO_ALIGN_GAP_MS = 2200;
     const MICRO_SLIP_MIN_SEC = 0.08;
+    const MICRO_WIDE_SCORE = 0.85; // below this, widen hunt; allow micro in file silence
+    const INTRO_SILENCE_SKIP_MAX = 12; // seed clock / search past leading track silence
     const VIZ_DB_FLOOR = -42; // shared dB floor for track + heard comparison
     const SEEK_STEP_SEC = 10;
     const VOL_POPOVER_FADE_MS = 2200;
@@ -3132,13 +3134,16 @@
       if (heardSpeech) {
         if (!manualClockPendingSince) manualClockPendingSince = Date.now();
         if (Date.now() - manualClockPendingSince >= CLOCK_ARM_MS) {
-          manualBaseSec = 0;
+          // Seed past leading track silence so the clock isn't behind the amp.
+          manualBaseSec = introSpeechSeedSec();
           manualStartedAt = Date.now();
           manualClockPendingSince = null;
           pushClipLog({
             kind: 'spot',
             at: Date.now(),
-            line: 'CLOCK ARMED · amp audio held ' + (CLOCK_ARM_MS / 1000).toFixed(1) + 's · tracking from 0:00'
+            line: 'CLOCK ARMED · amp audio held ' + (CLOCK_ARM_MS / 1000).toFixed(1) + 's · tracking from ' +
+              fmtTime(manualBaseSec) +
+              (manualBaseSec > 0 ? ' (skipped intro silence)' : '')
           });
           updateUI();
         }
@@ -3165,19 +3170,59 @@
       return lastMatchScore >= LOCK_CONFIDENCE_OK;
     }
 
+    // Adaptive hunt radius: mid confidence (~70%) can still be ~10s off — widen.
+    function microAlignRadiusSec() {
+      const s = lastMatchScore || 0;
+      if (s >= LOCK_CONFIDENCE_OK) return MICRO_ALIGN_RADIUS_SEC;
+      if (s >= MICRO_WIDE_SCORE) return 5;
+      if (s >= 0.75) return 10;
+      if (s >= 0.60) return 16;
+      return Math.min(PRELOCK_SEARCH_MAX_SEC, 24);
+    }
+
+    // If the file is quiet at `sec`, jump to the next speech burst (clear the silence blip).
+    function silenceAheadSec(sec) {
+      if (!fileBursts || !fileBursts.length) return 0;
+      if (fileExpectsSpeechAt(sec)) return 0;
+      for (let i = 0; i < fileBursts.length; i++) {
+        const b = fileBursts[i];
+        if (b.end <= sec) continue;
+        if (b.start > sec) return b.start - sec;
+        return 0; // inside a burst (edge case vs solid pad)
+      }
+      return 0;
+    }
+
+    function forwardSilenceAnchor(sec) {
+      const skip = silenceAheadSec(sec);
+      if (skip < 0.25) return { anchor: sec, skip: 0 };
+      const capped = Math.min(skip, INTRO_SILENCE_SKIP_MAX);
+      return { anchor: sec + capped, skip: capped };
+    }
+
+    // On clock arm at session start: skip leading track silence so we aren't behind the amp.
+    function introSpeechSeedSec() {
+      if (!fileBursts || !fileBursts.length) return 0;
+      const first = fileBursts[0];
+      if (first.start >= 0.35 && first.start <= INTRO_SILENCE_SKIP_MAX) return first.start;
+      return 0;
+    }
+
     function maybeMicroAlign(rms) {
       if ((state.mode !== 'armed' && state.mode !== 'manual') || !trackingLocked || !fileBuffer) return;
       if (lockConfidenceOk()) return;
       if (clipCollecting || clipBusy) return;
       if (Date.now() < nextMicroAt) return;
-      if (!fileExpectsSpeech) return;
+      // Low confidence: keep hunting even through file silence (clock may be sitting in a gap).
+      if (!fileExpectsSpeech && lastMatchScore >= MICRO_WIDE_SCORE) return;
       if (rms <= state.settings.silenceThreshold) return;
       microAlignMode = true;
       spotMode = false;
       spotFileStart = roomPosition();
       beginClipCollect();
       lastClipStatus = 'recording';
-      lastSpotStatus = 'micro-align · confidence ' + Math.round(lastMatchScore * 100) + '%';
+      lastSpotStatus = 'micro-align · confidence ' + Math.round(lastMatchScore * 100) +
+        '% · ±' + microAlignRadiusSec().toFixed(0) + 's';
       updateUI();
     }
 
@@ -3361,19 +3406,30 @@
     function manualMatchWindow() {
       const center = roomPosition();
       // Pre-lock: allow up to ~60 s search; bias forward; seed from silence-gap table when possible.
+      // If the clock sits in track silence, jump the anchor to the next speech burst.
       const unlocked = !trackingLocked;
+      const silence = unlocked ? forwardSilenceAnchor(center) : { anchor: center, skip: 0 };
       const gapSeed = unlocked ? bestGapSeedSec(recentMicGaps()) : null;
       const widen = unlocked || (manualMissStreak >= MANUAL_WIDE_MISS_THRESH && ambientRms > 0);
-      const bwd = widen ? (unlocked ? 20 : 15) : SEEK_RADIUS_SEC;
-      const fwd = widen ? PRELOCK_SEARCH_MAX_SEC : SEEK_RADIUS_SEC;
+      const bwd = widen ? (unlocked ? 12 : 15) : Math.min(SEEK_RADIUS_SEC, 20);
+      // Extra forward bias after clearing a silence blip — amp is ahead of a quiet file region.
+      const fwdBase = widen ? PRELOCK_SEARCH_MAX_SEC : SEEK_RADIUS_SEC;
+      const fwd = fwdBase + (silence.skip > 0 ? Math.min(8, silence.skip + 2) : 0);
       const anchor = (gapSeed != null && unlocked)
         ? gapSeed
-        : center;
+        : silence.anchor;
       const lo = Math.max(0, anchor - bwd);
       const hiRaw = anchor + fwd;
       const cap = fileDuration || hiRaw;
       const hi = Math.min(cap, lo + SEEK_WINDOW_MAX * 2, hiRaw);
-      return { start: lo, dur: Math.max(8, hi - lo), center: anchor, wide: widen, gapSeed };
+      return {
+        start: lo,
+        dur: Math.max(8, hi - lo),
+        center: anchor,
+        wide: widen,
+        gapSeed,
+        silenceSkip: silence.skip
+      };
     }
 
     function applyManualMatch(samples, sampleRate, clipMs) {
@@ -3386,7 +3442,8 @@
         pushClipLog({
           kind: 'miss',
           at: Date.now(),
-          line: 'MAN MISS no match in window' + (win.wide ? ' · wide +' + Math.round(win.dur) + 's' : '')
+          line: 'MAN MISS no match in window' + (win.wide ? ' · wide +' + Math.round(win.dur) + 's' : '') +
+            (win.silenceSkip ? (' · silence skip +' + win.silenceSkip.toFixed(1) + 's') : '')
         });
         updateUI();
         return;
@@ -3494,27 +3551,42 @@
     }
 
     // Short 1–2 s clips after lock while confidence < 95% — fine-seek amp clock.
+    // Radius widens as confidence drops so a ~70% lock can't sit ~10s off unchallenged.
     function applyMicroMatch(samples, sampleRate, fileStart, clipMs) {
-      nextMicroAt = Date.now() + MICRO_ALIGN_GAP_MS;
+      const prevScore = lastMatchScore || 0;
+      const radius = microAlignRadiusSec();
+      // Low confidence → hunt again sooner.
+      const gapMs = prevScore < MICRO_WIDE_SCORE
+        ? Math.max(900, MICRO_ALIGN_GAP_MS * 0.55)
+        : MICRO_ALIGN_GAP_MS;
+      nextMicroAt = Date.now() + gapMs;
       if ((state.mode !== 'armed' && state.mode !== 'manual') || !fileBuffer || !trackingLocked) {
         lastSpotStatus = 'micro skipped';
         updateUI();
         return;
       }
-      const radius = MICRO_ALIGN_RADIUS_SEC;
-      const winStart = Math.max(0, fileStart - radius);
-      const winDur = radius * 2 + Math.max(1, clipMs / 1000);
+      // Prefer searching from the next speech after silence so we aren't stuck in a quiet gap.
+      const silence = forwardSilenceAnchor(fileStart);
+      const huntFrom = silence.anchor;
+      const winStart = Math.max(0, huntFrom - Math.min(radius, 6));
+      const winDur = radius + Math.min(radius, 6) + Math.max(1, clipMs / 1000) +
+        (silence.skip > 0 ? Math.min(4, silence.skip) : 0);
       const result = matchClipToWindow(samples, sampleRate, winStart, winDur, clipMs);
       clipEnv = envelopeFromPcm(samples, sampleRate);
       if (!result || result.score === 0) {
-        clipEnvFileAt = Math.max(0, fileStart);
+        clipEnvFileAt = Math.max(0, huntFrom);
         lastClipStatus = 'miss';
+        // Missed wide: schedule another hunt quickly and widen further next time via low score.
+        nextMicroAt = Date.now() + 800;
         pushClipLog({
           kind: 'miss',
           at: Date.now(),
-          line: 'MICRO MISS @' + fmtTime(fileStart) + ' · ±' + radius.toFixed(1) + 's'
+          line: 'MICRO MISS @' + fmtTime(fileStart) +
+            (silence.skip ? (' · silence→' + fmtTime(huntFrom)) : '') +
+            ' · ±' + radius.toFixed(0) + 's'
         });
-        lastSpotStatus = 'micro miss · confidence ' + Math.round(lastMatchScore * 100) + '%';
+        lastSpotStatus = 'micro miss · confidence ' + Math.round(prevScore * 100) +
+          '% · widening';
         updateUI();
         return;
       }
@@ -3535,10 +3607,15 @@
         : 'gaps n/a';
       noteStrongLock(judged, result, clipMs);
       const base = formatClipLine(result, judged,
-        ' room@' + fmtTime(fileStart) + ' drift ' + drift.toFixed(2) + 's');
+        ' room@' + fmtTime(fileStart) + ' drift ' + drift.toFixed(2) + 's' +
+        (silence.skip ? (' · silence skip +' + silence.skip.toFixed(1) + 's') : ''));
       let slipped = 0;
-      const canSlip = (judged.ok || judged.nearMiss || result.score >= LOCK_CONFIDENCE_OK * 0.85) &&
-        Math.abs(drift) >= MICRO_SLIP_MIN_SEC && Math.abs(drift) <= radius;
+      const improved = result.score >= prevScore + 0.03;
+      const strongEnough = judged.ok || judged.nearMiss ||
+        result.score >= MICRO_WIDE_SCORE ||
+        (prevScore < MICRO_WIDE_SCORE && improved && result.score >= 0.55);
+      const withinHunt = Math.abs(drift) >= MICRO_SLIP_MIN_SEC && Math.abs(drift) <= (radius + silence.skip + 1);
+      const canSlip = strongEnough && withinHunt;
       if (canSlip) {
         slipAmpClock(result.offsetSec);
         slipped = drift;
@@ -3548,14 +3625,20 @@
         kind: confPct >= LOCK_CONFIDENCE_OK * 100 ? 'lock' : 'spot',
         at: Date.now(),
         line: 'MICRO ' + (slipped ? ('SLIP ' + (slipped >= 0 ? '+' : '') + slipped.toFixed(2) + 's · ') : '') +
-          base + (lockConfidenceOk() ? ' · ≥95% → spot checks' : '')
+          '±' + radius.toFixed(0) + 's · ' + base +
+          (lockConfidenceOk() ? ' · ≥95% → spot checks' : (improved && !slipped ? ' · score↑ hold' : ''))
       });
-      lastClipStatus = judged.ok || judged.nearMiss ? 'hit' : 'miss';
+      lastClipStatus = judged.ok || judged.nearMiss || improved ? 'hit' : 'miss';
       lastSpotStatus = lockConfidenceOk()
         ? ('micro OK · ' + confPct + '% · switching to spot checks')
-        : ('micro · ' + confPct + '%' + (slipped ? (' · slipped ' + (slipped >= 0 ? '+' : '') + slipped.toFixed(2) + 's') : ''));
+        : ('micro · ' + confPct + '%' +
+          (slipped ? (' · slipped ' + (slipped >= 0 ? '+' : '') + slipped.toFixed(2) + 's') : '') +
+          ' · ±' + radius.toFixed(0) + 's');
       if (lockConfidenceOk()) {
         nextSpotAt = Date.now() + Math.min(SPOT_WAIT_MS, 15000);
+      } else if (!slipped && prevScore < MICRO_WIDE_SCORE) {
+        // Still mid/low — keep pressure on with a quicker follow-up.
+        nextMicroAt = Date.now() + 1000;
       }
       updateUI();
     }
