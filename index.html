@@ -810,11 +810,11 @@
     <button type="button" class="btn" id="btnForgetFingerprints" style="width:100%;margin-top:8px">Clear stored fingerprints</button>
   </details>
 
-  <p class="ver mono" id="appVer">v1.6.15 · 2026-08-21 22:53</p>
+  <p class="ver mono" id="appVer">v1.6.16 · 2026-08-21 23:10</p>
   <p class="ver-note" id="appVerNote" hidden>v1.6.5 · Heard local bars · coverage soft when score/idf pass · near-miss keeps streak</p>
 
   <div class="bottom-bar">
-    <p class="bottom-hint" id="mainBtnHint">Press to start tracking · Take Over when ready</p>
+    <p class="bottom-hint" id="mainBtnHint">Play the amp first, then press — tracker starts behind the audio</p>
     <button type="button" class="btn primary" id="btnMain" disabled>Back me up</button>
   </div>
 
@@ -829,8 +829,8 @@
 
   <script>
     const $ = id => document.getElementById(id);
-    const APP_VER = '1.6.15';
-    const APP_BUILD = '2026-08-21 22:53';
+    const APP_VER = '1.6.16';
+    const APP_BUILD = '2026-08-21 23:10';
 
     const ENVELOPE_RATE = 20;
     const TRAIL_STEP_MS = 1000;
@@ -857,6 +857,11 @@
     const GAP_TABLE_MAX_SEC = 15; // long pauses are distinctive signatures
     const GAP_MATCH_NEAR_SEC = 30; // typical amp/file offset while hunting
     const GAP_MATCH_WIDE_SEC = 60; // rare: up to ~1 min apart
+    const BURST_SLIP_WINDOW_MS = 20000; // collect onset deltas over ~20 s
+    const BURST_SLIP_MIN_ONSETS = 3;
+    const BURST_SLIP_MIN_AVG_SEC = 0.08;
+    const BURST_SLIP_MAX_AVG_SEC = 12;
+    const BURST_SLIP_COOLDOWN_MS = 15000;
     const CUTOUT_BLIP_MS = 1200;
     const CUTOUT_COOLDOWN_MS = 12000;
     const CUTOUT_FAIL_COOLDOWN_MS = 20000;
@@ -1046,6 +1051,9 @@
     let silentTrackCooldownUntil = 0;
     let silentTrackLastSnapSec = -1; // last snapped burst — don't reuse until past it
     let silentTrackEligible = false; // only after a lock fails / drops — not at session start
+    let burstSlipOnsets = []; // { at, room, fileOnset, delta } while locked
+    let burstSlipWasSpeech = false;
+    let nextBurstSlipAt = 0;
     let spotFileStart = 0;
     let spotChecksDone = 0;
     let nextSpotAt = 0;
@@ -1898,6 +1906,8 @@
           if (clipCollecting && microAlignMode) line += ' · recording 1–2s clip…';
         } else if (clipCollecting && spotMode) {
           line += ' · spot-checking…';
+        } else if (burstSlipOnsets.length) {
+          line += ' · burst slip ' + burstSlipOnsets.length + ' onsets';
         }
         if (lastSpotStatus) line += ' · ' + lastSpotStatus;
         if (!fileExpectsSpeech) return line + ' · file pause';
@@ -3269,6 +3279,7 @@
       nextMicroAt = 0;
       nextSpotAt = 0;
       silentTrackEligible = true; // recovery only — silent markers after lock fails
+      resetBurstSlip();
       pushClipLog({
         kind: 'miss',
         at: Date.now(),
@@ -3713,19 +3724,20 @@
 
     function manualMatchWindow() {
       const center = roomPosition();
-      // Pre-lock: allow up to ~60 s search; bias forward; seed from silence-gap table when possible.
-      // If the clock sits in track silence, jump the anchor to the next speech burst.
+      // Play amp first, then track → audio is ahead; bias search forward, keep a small rear window.
       const unlocked = !trackingLocked;
       const silence = unlocked ? forwardSilenceAnchor(center) : { anchor: center, skip: 0 };
       const gapSeed = unlocked ? bestGapSeedSec(recentMicGapSecs(), center) : null;
       const widen = unlocked || (manualMissStreak >= MANUAL_WIDE_MISS_THRESH && ambientRms > 0);
-      const bwd = widen ? (unlocked ? 12 : 15) : Math.min(SEEK_RADIUS_SEC, 20);
-      const fwdBase = widen ? PRELOCK_SEARCH_MAX_SEC : SEEK_RADIUS_SEC;
+      const bwd = widen ? 8 : 6;
+      const fwdBase = widen ? PRELOCK_SEARCH_MAX_SEC : Math.max(SEEK_RADIUS_SEC, 40);
       const fwd = fwdBase + (silence.skip > 0 ? Math.min(8, silence.skip + 2) : 0);
       const seedRadius = gapMatchSearchRadius();
-      const anchor = (gapSeed != null && unlocked && Math.abs(gapSeed - center) <= seedRadius)
-        ? gapSeed
-        : silence.anchor;
+      // Prefer gap seeds at or ahead of the clock (amp already ahead).
+      let anchor = silence.anchor;
+      if (gapSeed != null && unlocked && gapSeed >= center - 5 && gapSeed - center <= seedRadius) {
+        anchor = gapSeed;
+      }
       const lo = Math.max(0, anchor - bwd);
       const hiRaw = anchor + fwd;
       const cap = fileDuration || hiRaw;
@@ -3999,6 +4011,8 @@
       lastSpotStatus = good
         ? ('spot #' + spotChecksDone + ' OK')
         : ('spot #' + spotChecksDone + ' weak');
+      // Spot window is also a good time to evaluate burst-onset slip if we have ~20s of data.
+      maybeApplyBurstSlip();
       updateUI();
     }
 
@@ -4723,9 +4737,96 @@
     }
 
     function gapMatchSearchRadius() {
-      // Typical offset ~15s; allow 30s normally, up to 60s after repeated misses.
+      // Amp plays first → usually ahead; widen after misses.
       if (manualMissStreak >= MANUAL_WIDE_MISS_THRESH) return GAP_MATCH_WIDE_SEC;
       return GAP_MATCH_NEAR_SEC;
+    }
+
+    // Nearest file burst onset at/ahead of our clock (amp is typically ahead).
+    function nearestFileOnsetAhead(roomSec) {
+      if (!fileBursts || !fileBursts.length) return null;
+      let best = null;
+      let bestRank = 1e9;
+      for (let i = 0; i < fileBursts.length; i++) {
+        const start = fileBursts[i].start;
+        if (start < roomSec - 2.5) continue;
+        if (start > roomSec + 18) break;
+        const d = start - roomSec;
+        const rank = d < 0 ? (-d + 4) : d;
+        if (rank < bestRank) {
+          bestRank = rank;
+          best = start;
+        }
+      }
+      return best;
+    }
+
+    function resetBurstSlip() {
+      burstSlipOnsets = [];
+      burstSlipWasSpeech = false;
+    }
+
+    // While locked in spot mode: record silence→voice onsets vs file burst starts.
+    // After ~20 s of samples, average delta is the slip to line tracks up.
+    function noteBurstOnsetForSlip(rms) {
+      if (!trackingLocked || !lockConfidenceOk()) {
+        if (burstSlipOnsets.length) resetBurstSlip();
+        return;
+      }
+      if (!fileBursts.length) return;
+      const heard = rms > state.settings.silenceThreshold;
+      if (heard && !burstSlipWasSpeech) {
+        const room = roomPosition();
+        const fileOnset = nearestFileOnsetAhead(room);
+        if (fileOnset != null) {
+          const delta = fileOnset - room;
+          const now = Date.now();
+          burstSlipOnsets.push({ at: now, room, fileOnset, delta });
+          const cutoff = now - (BURST_SLIP_WINDOW_MS + 8000);
+          while (burstSlipOnsets.length && burstSlipOnsets[0].at < cutoff) {
+            burstSlipOnsets.shift();
+          }
+          maybeApplyBurstSlip();
+        }
+      }
+      burstSlipWasSpeech = heard;
+    }
+
+    function maybeApplyBurstSlip() {
+      if (Date.now() < nextBurstSlipAt) return false;
+      if (burstSlipOnsets.length < BURST_SLIP_MIN_ONSETS) return false;
+      const t0 = burstSlipOnsets[0].at;
+      const t1 = burstSlipOnsets[burstSlipOnsets.length - 1].at;
+      if (t1 - t0 < BURST_SLIP_WINDOW_MS) return false;
+      let sum = 0;
+      for (let i = 0; i < burstSlipOnsets.length; i++) sum += burstSlipOnsets[i].delta;
+      const avg = sum / burstSlipOnsets.length;
+      const n = burstSlipOnsets.length;
+      const spanSec = (t1 - t0) / 1000;
+      burstSlipOnsets = [];
+      nextBurstSlipAt = Date.now() + BURST_SLIP_COOLDOWN_MS;
+      if (Math.abs(avg) < BURST_SLIP_MIN_AVG_SEC || Math.abs(avg) > BURST_SLIP_MAX_AVG_SEC) {
+        pushClipLog({
+          kind: 'spot',
+          at: Date.now(),
+          line: 'BURST SLIP skip · ' + n + ' onsets / ' + spanSec.toFixed(0) +
+            's · avg ' + (avg >= 0 ? '+' : '') + avg.toFixed(2) + 's (out of range)'
+        });
+        return false;
+      }
+      const room = roomPosition();
+      slipAmpClock(room + avg);
+      lastGoodOffset = room + avg;
+      lastGoodPerf = performance.now() / 1000;
+      lastSpotStatus = 'burst slip ' + (avg >= 0 ? '+' : '') + avg.toFixed(2) + 's';
+      pushClipLog({
+        kind: 'spot',
+        at: Date.now(),
+        line: 'BURST SLIP · ' + n + ' onsets / ' + spanSec.toFixed(0) +
+          's · avg ' + (avg >= 0 ? '+' : '') + avg.toFixed(2) + 's → amp@' + fmtTime(room + avg)
+      });
+      updateUI();
+      return true;
     }
 
     function recentMicGapSecs() {
@@ -4755,15 +4856,19 @@
       let bestErr = 1e9;
       for (let i = 0; i <= table.length - n; i++) {
         const candidate = table[i + n - 1].nextStart;
-        if (Math.abs(candidate - expect) > maxDist) continue;
+        // Amp ahead of tracker — prefer seeds at/forward of the clock.
+        if (candidate < expect - 5) continue;
+        if (candidate - expect > maxDist) continue;
         let sum = 0;
         for (let k = 0; k < n; k++) {
           const d = table[i + k].gapSec - needle[k];
           sum += d * d;
         }
         const err = Math.sqrt(sum / n);
-        if (err < bestErr) {
-          bestErr = err;
+        // Slight preference for forward matches (audio already playing).
+        const rank = err + Math.max(0, expect - candidate) * 0.02;
+        if (rank < bestErr) {
+          bestErr = rank;
           best = {
             nextStart: candidate,
             afterEnd: table[i + n - 1].afterEnd,
@@ -4927,6 +5032,7 @@
         noteUnexpectedSilence(fileExpectsSpeech, heardSpeech);
         if (heardSpeech && unexpectedSilenceMs === 0) inLogicalSync = true;
         if (trackingLocked) {
+          noteBurstOnsetForSlip(rms);
           if (lockConfidenceOk()) maybeSpotCheck(rms);
           else maybeMicroAlign(rms);
         } else {
@@ -4945,6 +5051,7 @@
         beginClipIfNeeded(rms);
         tickPrimedViz();
       } else if (state.mode === 'armed') {
+        noteBurstOnsetForSlip(rms);
         if (lockConfidenceOk()) maybeSpotCheck(rms);
         else maybeMicroAlign(rms);
         tickArmed(rms);
@@ -4983,8 +5090,10 @@
       microAlignMode = false;
       resetSilentTrack();
       silentTrackEligible = false; // fresh lock — normal tracking until it fails again
+      resetBurstSlip();
+      nextBurstSlipAt = 0;
       lastSpotStatus = lockConfidenceOk()
-        ? ('locked ' + Math.round(lastMatchScore * 100) + '% · spot checks')
+        ? ('locked ' + Math.round(lastMatchScore * 100) + '% · spot checks + burst slip')
         : ('locked ' + Math.round(lastMatchScore * 100) + '% · micro-aligning toward 95%');
       manualMissStreak = 0;
       // Grace period after lock — give the system time to stabilise before cutout can fire.
@@ -5199,6 +5308,8 @@
         vizDisplayPeak = 0;
         resetSilentTrack();
         silentTrackEligible = false;
+        resetBurstSlip();
+        nextBurstSlipAt = 0;
         lastSpotStatus = '';
         startClipCapture();
         if (!captureNode) throw new Error('This browser cannot capture mic clips for matching.');
@@ -5299,6 +5410,8 @@
       silentTrackCooldownUntil = 0;
       silentTrackLastSnapSec = -1;
       silentTrackEligible = false;
+      resetBurstSlip();
+      nextBurstSlipAt = 0;
       lastSpotStatus = '';
       state.analysing = false;
 
