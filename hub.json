@@ -1,7 +1,7 @@
 {
   "id": "audio-backup-helper",
   "title": "Back Me Up",
-  "version": "1.6.9",
+  "version": "1.6.10",
   "desc": "Arm a backup audio track, listen via mic, and take over instantly if the main amplifier cuts out. Audio stays on device.",
   "icon": "icon.svg",
   "iconPath": "icon.svg",
@@ -22,6 +22,11 @@
     "fingerprint"
   ],
   "changelog": [
+    {
+      "version": "1.6.10",
+      "date": "2026-08-21",
+      "notes": "Reject far teleport hits; gap-seed only near clock; proximity-biased tile ranking (log #1 fix)"
+    },
     {
       "version": "1.6.9",
       "date": "2026-08-21",
