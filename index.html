@@ -804,7 +804,7 @@
     <button type="button" class="btn" id="btnForgetFingerprints" style="width:100%;margin-top:8px">Clear stored fingerprints</button>
   </details>
 
-  <p class="ver mono" id="appVer">v1.6.13 · 2026-08-21 22:34</p>
+  <p class="ver mono" id="appVer">v1.6.14 · 2026-08-21 22:40</p>
   <p class="ver-note" id="appVerNote" hidden>v1.6.5 · Heard local bars · coverage soft when score/idf pass · near-miss keeps streak</p>
 
   <div class="bottom-bar">
@@ -823,8 +823,8 @@
 
   <script>
     const $ = id => document.getElementById(id);
-    const APP_VER = '1.6.13';
-    const APP_BUILD = '2026-08-21 22:34';
+    const APP_VER = '1.6.14';
+    const APP_BUILD = '2026-08-21 22:40';
 
     const ENVELOPE_RATE = 20;
     const TRAIL_STEP_MS = 1000;
@@ -1032,6 +1032,7 @@
     let silentTrackGap = null; // { afterEnd, nextStart, gapSec }
     let silentTrackCooldownUntil = 0;
     let silentTrackLastSnapSec = -1; // last snapped burst — don't reuse until past it
+    let silentTrackEligible = false; // only after a lock fails / drops — not at session start
     let spotFileStart = 0;
     let spotChecksDone = 0;
     let nextSpotAt = 0;
@@ -3241,10 +3242,12 @@
       lastSpotStatus = 'lock dropped · searching again';
       nextMicroAt = 0;
       nextSpotAt = 0;
+      silentTrackEligible = true; // recovery only — silent markers after lock fails
       pushClipLog({
         kind: 'miss',
         at: Date.now(),
-        line: 'LOCK DROP · ' + reason + ' · amp@' + fmtTime(room) + ' · searching again'
+        line: 'LOCK DROP · ' + reason + ' · amp@' + fmtTime(room) +
+          ' · searching again · silent track eligible'
       });
       if (state.mode === 'armed' || state.mode === 'backing') setMode('manual');
       else setMode('manual');
@@ -3355,14 +3358,17 @@
       silentTrackGap = null;
     }
 
-    // Silent markers help re-acquire after unlock (or while unlocked mid-search).
+    // Silent markers only after a lock has failed — never at first listen / outset.
     function maybeEnterSilentTrack() {
       if (trackingLocked) {
         if (silentTrackMode) resetSilentTrack();
         return;
       }
+      if (!silentTrackEligible) {
+        if (silentTrackMode) resetSilentTrack();
+        return;
+      }
       if ((lastMatchScore || 0) >= SILENT_TRACK_SCORE && lastGoodPerf) {
-        // Fresh high score while searching — no need for markers.
         if (silentTrackMode) resetSilentTrack();
         return;
       }
@@ -3385,7 +3391,7 @@
         pushClipLog({
           kind: 'spot',
           at: Date.now(),
-          line: 'SILENT TRACK ON · unlocked · conf ' + Math.round((lastMatchScore || 0) * 100) +
+          line: 'SILENT TRACK ON · after lock fail · conf ' + Math.round((lastMatchScore || 0) * 100) +
             '% · file gap ' + gap.gapSec.toFixed(1) + 's · next burst @' + fmtTime(gap.nextStart)
         });
       }
@@ -3792,6 +3798,8 @@
       cutoutVerifyMode = false;
       spotChecksDone = 0;
       nextSpotAt = Date.now() + SPOT_WAIT_MS;
+      silentTrackEligible = false;
+      resetSilentTrack();
       lastSpotStatus = 're-locked after cutout';
       setMode('manual');
       updateUI();
@@ -4876,6 +4884,7 @@
       nextMicroAt = 0;
       microAlignMode = false;
       resetSilentTrack();
+      silentTrackEligible = false; // fresh lock — normal tracking until it fails again
       lastSpotStatus = lockConfidenceOk()
         ? ('locked ' + Math.round(lastMatchScore * 100) + '% · spot checks')
         : ('locked ' + Math.round(lastMatchScore * 100) + '% · micro-aligning toward 95%');
@@ -5091,6 +5100,7 @@
         nextMicroAt = 0;
         vizDisplayPeak = 0;
         resetSilentTrack();
+        silentTrackEligible = false;
         lastSpotStatus = '';
         startClipCapture();
         if (!captureNode) throw new Error('This browser cannot capture mic clips for matching.');
@@ -5188,6 +5198,7 @@
       resetSilentTrack();
       silentTrackCooldownUntil = 0;
       silentTrackLastSnapSec = -1;
+      silentTrackEligible = false;
       lastSpotStatus = '';
       state.analysing = false;
 
