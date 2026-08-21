@@ -804,7 +804,7 @@
     <button type="button" class="btn" id="btnForgetFingerprints" style="width:100%;margin-top:8px">Clear stored fingerprints</button>
   </details>
 
-  <p class="ver mono" id="appVer">v1.6.9 · 2026-08-21 22:00</p>
+  <p class="ver mono" id="appVer">v1.6.10 · 2026-08-21 22:12</p>
   <p class="ver-note" id="appVerNote" hidden>v1.6.5 · Heard local bars · coverage soft when score/idf pass · near-miss keeps streak</p>
 
   <div class="bottom-bar">
@@ -823,8 +823,8 @@
 
   <script>
     const $ = id => document.getElementById(id);
-    const APP_VER = '1.6.9';
-    const APP_BUILD = '2026-08-21 22:00';
+    const APP_VER = '1.6.10';
+    const APP_BUILD = '2026-08-21 22:12';
 
     const ENVELOPE_RATE = 20;
     const TRAIL_STEP_MS = 1000;
@@ -843,6 +843,8 @@
     const MIN_CLIP_CONTRAST = 4;
     const MIN_GAP_SCORE = 0.62;
     const MAX_CLOCK_DRIFT = 1.25;
+    const MAX_HIT_JUMP_SEC = 25; // reject "hits" that teleport far from expected file time
+    const GAP_SEED_MAX_DIST_SEC = 45; // silence-gap seed must stay near the user clock
     const CUTOUT_BLIP_MS = 1200;
     const CUTOUT_COOLDOWN_MS = 12000;
     const CUTOUT_FAIL_COOLDOWN_MS = 20000;
@@ -1000,6 +1002,8 @@
     let lastClipGapBit = '';
     let lastHitOffset = 0;
     let lastHitPerf = 0;
+    let lastGoodOffset = 0; // survives streak resets — blocks far teleports
+    let lastGoodPerf = 0;
     let hitStreak = 0;
     let clipLog = [];
     let logCounter = 0;
@@ -1556,6 +1560,11 @@
       hitStreak = 0;
       lastHitOffset = 0;
       lastHitPerf = 0;
+    }
+
+    function clearGoodMatchMemory() {
+      lastGoodOffset = 0;
+      lastGoodPerf = 0;
     }
 
     function isClipMatchMode() {
@@ -2363,16 +2372,17 @@
 
     // Match a clip against overlapping tiles across a search window.
     // Returns the best-scoring result with absolute offsetSec already applied.
-    function matchClipToWindow(samples, sampleRate, winStart, winDur, clipMs) {
+    // Optional centerHint biases toward the expected file time when ranks are close.
+    function matchClipToWindow(samples, sampleRate, winStart, winDur, clipMs, centerHint) {
       if (!fileBuffer) return null;
       const clipSec = clipMs / 1000;
-      // Tile width: at least the clip length + 1s, capped at TILE_SEC (or wider for long clips).
       const tileWidth = Math.max(clipSec + 1, TILE_SEC);
       const step = Math.max(1, TILE_STEP_SEC);
       let best = null;
       let bestRank = -1;
       let tileStart = winStart;
       const winEnd = winStart + winDur;
+      const hint = centerHint == null ? (winStart + winDur * 0.35) : centerHint;
       while (tileStart < winEnd) {
         const tileEnd = Math.min(winEnd, tileStart + tileWidth);
         const tileDur = tileEnd - tileStart;
@@ -2380,17 +2390,34 @@
         const tile = buildTemplateIndex(fileBuffer, tileDur, tileStart);
         if (tile.hashCount < 8) { tileStart += step; continue; }
         const res = matchClipToTemplate(samples, sampleRate, tile);
-        // Rank by score * coverage — both matter.
-        const rank = (res.score || 0) * (res.coverage || 0);
+        const abs = (tile.originSec || 0) + res.offsetSec;
+        const dist = Math.abs(abs - hint);
+        // Prefer near the clock when scores are similar — stops far coincidental matches.
+        const prox = 1 / (1 + dist / 18);
+        const rank = (res.score || 0) * (res.coverage || 0.15) * (0.55 + 0.45 * prox);
         if (rank > bestRank) {
           bestRank = rank;
           best = res;
-          best.offsetSec = (tile.originSec || 0) + res.offsetSec;
+          best.offsetSec = abs;
           best._tileOrigin = tile.originSec || 0;
+          best._distHint = dist;
         }
         tileStart += step;
       }
       return best;
+    }
+
+    function expectedMatchSec() {
+      if (lastGoodPerf && lastGoodOffset >= 0) {
+        const age = performance.now() / 1000 - lastGoodPerf;
+        if (age >= 0 && age < 180) return lastGoodOffset + age;
+      }
+      return roomPosition();
+    }
+
+    function hitJumpLimitSec() {
+      if (trackingLocked) return Math.max(MAX_HIT_JUMP_SEC, microAlignRadiusSec() + 4);
+      return Math.max(MAX_HIT_JUMP_SEC, PRELOCK_SEARCH_MAX_SEC * 0.55);
     }
 
     function scoreNeedHits(clipSec) {
@@ -3478,6 +3505,17 @@
       const judged = judgeClip(result, clipMs);
       const now = Date.now();
       let clockNote = '';
+      const expectSec = expectedMatchSec();
+      const jump = Math.abs((result.offsetSec || 0) - expectSec);
+      const jumpLimit = hitJumpLimitSec();
+      // Block far teleports (e.g. @52:56 while clock is ~2:00) even after streak resets.
+      if (judged.ok && jump > jumpLimit) {
+        judged.ok = false;
+        judged.reasons.push(
+          'teleport ' + jump.toFixed(0) + 's from expect @' + fmtTime(expectSec) +
+          ' (max ' + jumpLimit.toFixed(0) + 's)'
+        );
+      }
       if (judged.ok && hitStreak >= 1 && lastHitPerf) {
         const dtWall = lastClipPerfStart - lastHitPerf;
         const dtFile = result.offsetSec - lastHitOffset;
@@ -3511,6 +3549,8 @@
         manualMissStreak = 0;
         lastHitOffset = result.offsetSec;
         lastHitPerf = lastClipPerfStart;
+        lastGoodOffset = result.offsetSec;
+        lastGoodPerf = lastClipPerfStart;
         hasAlign = true;
         alignPerfAt = lastClipPerfStart;
         alignFileAt = result.offsetSec;
@@ -3542,9 +3582,10 @@
       } else {
         lastClipStatus = 'miss';
         lastClipFail = judged.reasons.join(' · ');
+        const nearExpect = Math.abs((result.offsetSec || 0) - expectSec) < 12;
         const nearPos = hitStreak > 0 && lastHitOffset &&
           Math.abs(result.offsetSec - lastHitOffset) < 10;
-        const nearMiss = judged.nearMiss && nearPos;
+        const nearMiss = judged.nearMiss && (nearPos || nearExpect);
         if (nearMiss) {
           // Soft miss: keep streak — do not wipe a good lock path on one weak clip.
           pushClipLog({
@@ -3589,13 +3630,14 @@
       // If the clock sits in track silence, jump the anchor to the next speech burst.
       const unlocked = !trackingLocked;
       const silence = unlocked ? forwardSilenceAnchor(center) : { anchor: center, skip: 0 };
-      const gapSeed = unlocked ? bestGapSeedSec(recentMicGaps()) : null;
+      const gapSeed = unlocked ? bestGapSeedSec(recentMicGaps(), center) : null;
       const widen = unlocked || (manualMissStreak >= MANUAL_WIDE_MISS_THRESH && ambientRms > 0);
       const bwd = widen ? (unlocked ? 12 : 15) : Math.min(SEEK_RADIUS_SEC, 20);
       // Extra forward bias after clearing a silence blip — amp is ahead of a quiet file region.
       const fwdBase = widen ? PRELOCK_SEARCH_MAX_SEC : SEEK_RADIUS_SEC;
       const fwd = fwdBase + (silence.skip > 0 ? Math.min(8, silence.skip + 2) : 0);
-      const anchor = (gapSeed != null && unlocked)
+      // Never let a gap seed yank the window far from the advancing clock.
+      const anchor = (gapSeed != null && unlocked && Math.abs(gapSeed - center) <= GAP_SEED_MAX_DIST_SEC)
         ? gapSeed
         : silence.anchor;
       const lo = Math.max(0, anchor - bwd);
@@ -3614,7 +3656,9 @@
 
     function applyManualMatch(samples, sampleRate, clipMs) {
       const win = manualMatchWindow();
-      const result = matchClipToWindow(samples, sampleRate, win.start, win.dur, clipMs);
+      const result = matchClipToWindow(
+        samples, sampleRate, win.start, win.dur, clipMs, win.center || expectedMatchSec()
+      );
       if (!result || result.score === 0) {
         lastClipStatus = 'miss';
         lastClipFail = 'no match in window';
@@ -3646,7 +3690,7 @@
       const bwdSec = 15;
       const winStart = Math.max(0, room - bwdSec);
       const winDur   = bwdSec + fwdSec;
-      const result = matchClipToWindow(samples, sampleRate, winStart, winDur, clipMs);
+      const result = matchClipToWindow(samples, sampleRate, winStart, winDur, clipMs, room);
       if (!result || result.score === 0) {
         pushClipLog({ kind: 'miss', at: Date.now(),
           line: 'CUTOUT RELOCK MISS attempt ' + cutoutRelockAttempts + ' · no match in ±' + fwdSec + 's window' });
@@ -3704,7 +3748,7 @@
 
     function applySeekMatch(samples, sampleRate, clipMs) {
       const win = seekWindow();
-      const result = matchClipToWindow(samples, sampleRate, win.start, win.dur, clipMs);
+      const result = matchClipToWindow(samples, sampleRate, win.start, win.dur, clipMs, win.center);
       if (!result || result.score === 0) {
         lastClipStatus = 'miss';
         lastClipFail = 'no match in seek window';
@@ -3751,7 +3795,7 @@
       const winStart = Math.max(0, huntFrom - Math.min(radius, 6));
       const winDur = radius + Math.min(radius, 6) + Math.max(1, clipMs / 1000) +
         (silence.skip > 0 ? Math.min(4, silence.skip) : 0);
-      const result = matchClipToWindow(samples, sampleRate, winStart, winDur, clipMs);
+      const result = matchClipToWindow(samples, sampleRate, winStart, winDur, clipMs, huntFrom);
       clipEnv = envelopeFromPcm(samples, sampleRate);
       if (!result || result.score === 0) {
         clipEnvFileAt = Math.max(0, huntFrom);
@@ -4574,14 +4618,17 @@
       }
     }
 
-    function bestGapSeedSec(micGaps) {
-      // Match a short sequence of mic inter-burst gaps against the file silence table.
+    function bestGapSeedSec(micGaps, nearSec) {
+      // Match mic inter-burst gaps to the file silence table — only near the user clock.
       if (!micGaps.length || !fileGapTable.length) return null;
       const n = Math.min(micGaps.length, 4);
       const needle = micGaps.slice(-n);
+      const expect = nearSec == null ? roomPosition() : nearSec;
       let best = null;
       let bestErr = 1e9;
       for (let i = 0; i <= fileGapTable.length - n; i++) {
+        const candidate = fileGapTable[i + n - 1].nextStart;
+        if (Math.abs(candidate - expect) > GAP_SEED_MAX_DIST_SEC) continue;
         let err = 0;
         for (let k = 0; k < n; k++) {
           const d = Math.abs(fileGapTable[i + k].gapSec - needle[k]);
@@ -4590,11 +4637,9 @@
         err = Math.sqrt(err / n);
         if (err < bestErr) {
           bestErr = err;
-          // Seed just after this gap cluster → next burst start
-          best = fileGapTable[i + n - 1].nextStart;
+          best = candidate;
         }
       }
-      // Accept only reasonably tight gap matches
       if (best == null || bestErr > 0.55) return null;
       return best;
     }
@@ -4977,6 +5022,7 @@
         hitStreak = 0;
         lastHitOffset = 0;
         lastHitPerf = 0;
+        clearGoodMatchMemory();
         clipLog = [];
         lockReason = '';
         lastMatchScore = 0;
@@ -5103,6 +5149,7 @@
       inLogicalSync = false;
       fileExpectsSpeech = false;
       resetConfirmHold();
+      clearGoodMatchMemory();
       lockPositionSec = 0;
       lockClockAt = 0;
       lockedBufferMs = 0;
@@ -5187,6 +5234,7 @@
       hitStreak = 0;
       manualMissStreak = 0;
       confirmHeldMs = 0;
+      clearGoodMatchMemory();
       trackedPosition = 0;
       lockPositionSec = 0;
       lockClockAt = 0;
