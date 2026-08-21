@@ -810,7 +810,7 @@
     <button type="button" class="btn" id="btnForgetFingerprints" style="width:100%;margin-top:8px">Clear stored fingerprints</button>
   </details>
 
-  <p class="ver mono" id="appVer">v1.6.16 · 2026-08-21 23:29</p>
+  <p class="ver mono" id="appVer">v1.6.16 · 2026-08-21 23:57</p>
   <p class="ver-note" id="appVerNote" hidden>v1.6.5 · Heard local bars · coverage soft when score/idf pass · near-miss keeps streak</p>
 
   <div class="bottom-bar">
@@ -830,7 +830,7 @@
   <script>
     const $ = id => document.getElementById(id);
     const APP_VER = '1.6.17';
-    const APP_BUILD = '2026-08-21 23:29';
+    const APP_BUILD = '2026-08-21 23:57';
 
     const ENVELOPE_RATE = 20;
     const TRAIL_STEP_MS = 1000;
@@ -907,6 +907,9 @@
     const SPOT_WAIT_MS = 60000;
     const LOCK_CONFIDENCE_OK = 0.95; // ≥95% → spot checks only
     const LOCK_DROP_SCORE = 0.90; // while locked, below this → drop lock (be honest)
+    const SPOT_WEAK_DROP_STREAK = 2; // one sparse spot with tight drift is noise, not unlock
+    const SPOT_CLOSE_SEC = 1.5; // spot still on-clock if |match − room| under this
+    const PRELOCK_CATCHUP_DRIFT_SEC = 4.5; // allow file>wall when hunting (clock was behind)
     const MICRO_CLIP_MIN_SEC = 1.0;
     const MICRO_CLIP_MAX_SEC = 2.0;
     const MICRO_ALIGN_RADIUS_SEC = 3.5;
@@ -1065,6 +1068,7 @@
     let nextAmpVotePullAt = 0;
     let spotFileStart = 0;
     let spotChecksDone = 0;
+    let spotWeakStreak = 0;
     let nextSpotAt = 0;
     let lastSpotStatus = '';
     let dirHandle = null;
@@ -3288,6 +3292,7 @@
       nextMicroAt = 0;
       nextSpotAt = 0;
       silentTrackEligible = true; // recovery only — silent markers after lock fails
+      spotWeakStreak = 0;
       resetBurstSlip();
       resetAmpVotes();
       pushClipLog({
@@ -3302,17 +3307,42 @@
     }
 
     // After spot/micro updates lastMatchScore — drop lock if confidence fell.
-    function notePostLockConfidence(score, source) {
+    // opts.clockClose: spot still lines up in time — one weak clip is noise.
+    function notePostLockConfidence(score, source, opts) {
       if (!trackingLocked) return false;
-      lastMatchScore = score;
-      if (score < LOCK_DROP_SCORE) {
-        dropLock(
-          (source || 'confidence') + ' ' + Math.round(score * 100) +
-          '% < ' + Math.round(LOCK_DROP_SCORE * 100) + '%'
-        );
-        return true;
+      const close = !!(opts && opts.clockClose);
+      if (score >= LOCK_DROP_SCORE) {
+        spotWeakStreak = 0;
+        lastMatchScore = score;
+        return false;
       }
-      return false;
+      if (close) {
+        spotWeakStreak += 1;
+        // Keep prior mandate for ≥95% routing until a second weak confirms failure.
+        if (spotWeakStreak < SPOT_WEAK_DROP_STREAK) {
+          pushClipLog({
+            kind: 'spot',
+            at: Date.now(),
+            line: 'LOCK HOLD · weak ' + Math.round(score * 100) +
+              '% but on-clock · streak ' + spotWeakStreak + '/' + SPOT_WEAK_DROP_STREAK +
+              ' · ' + (source || 'check') + ' · not dropping'
+          });
+          if (source && String(source).indexOf('spot') >= 0) {
+            nextSpotAt = Date.now() + Math.min(SPOT_WAIT_MS, 12000);
+            lastSpotStatus = 'spot weak · on-clock · holding lock';
+          }
+          updateUI();
+          return false;
+        }
+      } else {
+        spotWeakStreak = 0;
+      }
+      lastMatchScore = score;
+      dropLock(
+        (source || 'confidence') + ' ' + Math.round(score * 100) +
+        '% < ' + Math.round(LOCK_DROP_SCORE * 100) + '%'
+      );
+      return true;
     }
 
     // Adaptive hunt radius: mid confidence (~70%) can still be ~10s off — widen.
@@ -3629,9 +3659,16 @@
         const dtFile = result.offsetSec - lastHitOffset;
         const drift = Math.abs(dtFile - dtWall);
         clockNote = ' file+' + dtFile.toFixed(1) + 's wall+' + dtWall.toFixed(1) + 's drift ' + drift.toFixed(1) + 's';
-        if (dtWall > 0.4 && drift > MAX_CLOCK_DRIFT) {
+        // Pre-lock: clock often lags the amp — a perfect match that jumps file ahead
+        // of wall is catch-up, not a broken clock. Only reject wild jumps when locked
+        // (or when the match leaps backward / far beyond catch-up).
+        let driftLimit = MAX_CLOCK_DRIFT;
+        if (!trackingLocked && dtFile > dtWall && (result.offsetSec || 0) >= expectSec - 1) {
+          driftLimit = PRELOCK_CATCHUP_DRIFT_SEC;
+        }
+        if (dtWall > 0.4 && drift > driftLimit) {
           judged.ok = false;
-          judged.reasons.push('clock ' + clockNote.trim() + ' > ' + MAX_CLOCK_DRIFT + 's');
+          judged.reasons.push('clock ' + clockNote.trim() + ' > ' + driftLimit.toFixed(2) + 's');
         }
       }
       lastMatchScore = result.score;
@@ -3847,6 +3884,7 @@
       cutoutVerifyPending = false;
       cutoutVerifyMode = false;
       spotChecksDone = 0;
+      spotWeakStreak = 0;
       nextSpotAt = Date.now() + SPOT_WAIT_MS;
       silentTrackEligible = false;
       resetSilentTrack();
@@ -3968,7 +4006,9 @@
           (lockConfidenceOk() ? ' · ≥95% → spot checks' : (improved && !slipped ? ' · score↑ hold' : ''))
       });
       lastClipStatus = judged.ok || judged.nearMiss || improved ? 'hit' : 'miss';
-      if (notePostLockConfidence(result.score, 'micro')) return;
+      if (notePostLockConfidence(result.score, 'micro', {
+        clockClose: Math.abs(drift) < SPOT_CLOSE_SEC
+      })) return;
       lastSpotStatus = lockConfidenceOk()
         ? ('micro OK · ' + confPct + '% · switching to spot checks')
         : ('micro · ' + confPct + '%' +
@@ -4001,10 +4041,9 @@
       Object.assign(result, pattern);
       const judged = judgeClip(result, clipMs);
       const drift = Math.abs(absOffset - fileStart);
-      const close = drift < 1.5;
+      const close = drift < SPOT_CLOSE_SEC;
       const good = judged.ok && close;
       noteStrongLock({ ok: good, coverage: judged.coverage }, result, clipMs);
-      lastMatchScore = result.score;
       lastClipHits = Math.round(result.hits || 0);
       lastClipContrast = result.contrast || 0;
       lastClipOffset = absOffset;
@@ -4026,9 +4065,15 @@
       });
       // Spot polls the current amp time: OK keeps the seat, weak/low loses it.
       castAmpElection(good ? absOffset : fileStart, result.score, good ? 'spot' : 'spot weak');
-      if (notePostLockConfidence(result.score, good ? 'spot' : 'spot weak')) {
+      if (good) {
+        lastMatchScore = result.score;
+        spotWeakStreak = 0;
+      } else if (notePostLockConfidence(result.score, 'spot weak', { clockClose: close })) {
         return;
+      } else if (!close) {
+        lastMatchScore = result.score;
       }
+      // If on-clock but weak, leave lastMatchScore at prior strong value (HOLD path).
       lastSpotStatus = good
         ? ('spot #' + spotChecksDone + ' OK')
         : ('spot #' + spotChecksDone + ' weak');
@@ -5304,6 +5349,7 @@
       alignPerfAt = performance.now() / 1000;
       alignFileAt = roomNow;
       spotChecksDone = 0;
+      spotWeakStreak = 0;
       nextSpotAt = Date.now() + SPOT_WAIT_MS;
       nextMicroAt = 0;
       microAlignMode = false;
