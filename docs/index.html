@@ -810,7 +810,7 @@
     <button type="button" class="btn" id="btnForgetFingerprints" style="width:100%;margin-top:8px">Clear stored fingerprints</button>
   </details>
 
-  <p class="ver mono" id="appVer">v1.6.16 · 2026-08-22 00:20</p>
+  <p class="ver mono" id="appVer">v1.6.16 · 2026-08-22 00:25</p>
   <p class="ver-note" id="appVerNote" hidden>v1.6.5 · Heard local bars · coverage soft when score/idf pass · near-miss keeps streak</p>
 
   <div class="bottom-bar">
@@ -829,8 +829,8 @@
 
   <script>
     const $ = id => document.getElementById(id);
-    const APP_VER = '1.6.20';
-    const APP_BUILD = '2026-08-22 00:20';
+    const APP_VER = '1.6.22';
+    const APP_BUILD = '2026-08-22 00:25';
 
     const ENVELOPE_RATE = 20;
     const TRAIL_STEP_MS = 1000;
@@ -857,9 +857,16 @@
     const GAP_TABLE_MAX_SEC = 15; // long pauses are distinctive signatures
     const GAP_MATCH_NEAR_SEC = 30; // typical amp/file offset while hunting
     const GAP_MATCH_WIDE_SEC = 60; // rare: up to ~1 min apart
-    const BURST_SLIP_WINDOW_MS = 20000; // collect onset deltas over ~20 s
+    const BURST_SLIP_WINDOW_MS = 20000; // soft-lock onset deltas over ~20 s
     const BURST_SLIP_MIN_ONSETS = 4;
     const BURST_SLIP_COOLDOWN_MS = 20000;
+    // Fine-tune (≥95% only): 20% peak rising-crossings, clip vs track, 20s average.
+    const FINE_CROSS_FRAC = 0.20;
+    const FINE_WINDOW_MS = 20000;
+    const FINE_MIN_SAMPLES = 4;
+    const FINE_COOLDOWN_MS = 20000;
+    const FINE_POLL_MS = 2500; // live envelope poll while strong-locked
+    const FINE_POLL_SEC = 2.0; // seconds of mic/file to compare per poll
     // Amp-time election: high-conf polls win; consistently low-conf times lose.
     const AMP_VOTE_BUCKET_SEC = 0.5;
     const AMP_VOTE_MIN_SCORE = 0.90; // ≥90% → upvote this amp time
@@ -1065,6 +1072,11 @@
     let burstSlipOnsets = []; // { at, room, fileOnset, delta } while soft-locked
     let burstSlipWasSpeech = false;
     let nextBurstSlipAt = 0;
+    let fineCrossSamples = []; // { at, delta } — 20s ≥95% fine-tune window
+    let fineCrossPairs = []; // last paired crossings for viz [{ micSec, fileSec, delta }]
+    let fineCrossFlash = null; // { until, avg, targetSec }
+    let nextFinePollAt = 0;
+    let nextFineApplyAt = 0;
     let ampConfidenceVotes = []; // { bucket, score, weight, at, source }
     let ampVoteLeaderSec = null;
     let nextAmpVotePullAt = 0;
@@ -1921,6 +1933,13 @@
           if (clipCollecting && microAlignMode) line += ' · recording 1–2s clip…';
         } else if (clipCollecting && spotMode) {
           line += ' · spot-checking…';
+        } else if (lockConfidenceOk() && fineCrossSamples.length) {
+          const live = fineTuneLiveStats();
+          line += ' · fine ≥95% ' + fineCrossSamples.length + '/' +
+            Math.round(FINE_WINDOW_MS / 1000) + 's';
+          if (live && live.avg != null) {
+            line += ' · med ' + (live.avg >= 0 ? '+' : '') + live.avg.toFixed(2) + 's';
+          }
         } else if (burstSlipOnsets.length) {
           line += ' · burst slip ' + burstSlipOnsets.length + ' onsets';
         }
@@ -3315,6 +3334,7 @@
       spotWeakStreak = 0;
       resetBurstSlip();
       resetAmpVotes();
+      resetFineTune();
       pushClipLog({
         kind: 'miss',
         at: Date.now(),
@@ -4109,7 +4129,10 @@
       lastSpotStatus = good
         ? ('spot #' + spotChecksDone + ' OK')
         : ('spot #' + spotChecksDone + ' weak');
-      // Spot window is also a good time to evaluate burst-onset slip if we have ~20s of data.
+      if (good && lockConfidenceOk()) {
+        noteFineTuneFromClip(clipEnv, absOffset);
+      }
+      // Soft-lock burst slip only when confidence is below 95%.
       maybeApplyBurstSlip();
       updateUI();
     }
@@ -4667,7 +4690,7 @@
       ctx.stroke();
     }
 
-    // Short tick for matched-clip span under Track (not fine-tune onset markers).
+    // Short tick for matched-clip span / fine-tune crossings under Track.
     function drawShortTick(ctx, w, h, sec, windowSec, color, dashed) {
       if (sec == null || sec < 0 || sec > windowSec) return;
       const x = sec / windowSec * w;
@@ -4681,6 +4704,276 @@
       ctx.lineTo(x, dashed ? h * 0.55 : h * 0.4);
       ctx.stroke();
       ctx.restore();
+    }
+
+    function drawThreshLine(ctx, w, h, frac, peak, color) {
+      if (!peak || peak < 1e-8) return;
+      const dpr = Math.min(2, window.devicePixelRatio || 1);
+      const pad = 4 * dpr;
+      const usable = h - pad * 2;
+      const amp = ampToDisplay(frac * peak, peak);
+      const y = h - pad - amp * usable;
+      ctx.save();
+      ctx.strokeStyle = color || 'rgba(180, 90, 40, 0.55)';
+      ctx.lineWidth = Math.max(1, dpr);
+      ctx.setLineDash([4 * dpr, 4 * dpr]);
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.lineTo(w, y);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    function risingCrossingBins(env, thresh) {
+      const out = [];
+      if (!env || env.length < 2) return out;
+      for (let i = 1; i < env.length; i++) {
+        if (env[i - 1] < thresh && env[i] >= thresh) out.push(i);
+      }
+      return out;
+    }
+
+    // Compare mic envelope to file envelope at offsetSec using ~20% peak rising crossings.
+    function crossingOffsetsAt20pct(micEnv, offsetSec) {
+      const empty = { pairs: [], deltas: [], micPeak: 0, filePeak: 0 };
+      if (!micEnv || !micEnv.length || !fileEnvelope || !fileEnvelope.length) return empty;
+      const i0 = Math.max(0, Math.round(offsetSec * ENVELOPE_RATE));
+      const n = Math.min(micEnv.length, Math.max(0, fileEnvelope.length - i0));
+      if (n < 8) return empty;
+      let micPeak = 0.0001;
+      for (let i = 0; i < n; i++) if (micEnv[i] > micPeak) micPeak = micEnv[i];
+      const filePeak = peakOfRange(fileEnvelope, i0, i0 + n) || 0.0001;
+      const micThresh = FINE_CROSS_FRAC * micPeak;
+      const fileThresh = FINE_CROSS_FRAC * filePeak;
+      const micBins = risingCrossingBins(
+        n === micEnv.length ? micEnv : micEnv.subarray ? micEnv.subarray(0, n) : Array.prototype.slice.call(micEnv, 0, n),
+        micThresh
+      );
+      const fileSlice = fileEnvelope.subarray
+        ? fileEnvelope.subarray(i0, i0 + n)
+        : Array.prototype.slice.call(fileEnvelope, i0, i0 + n);
+      const fileBins = risingCrossingBins(fileSlice, fileThresh);
+      if (!micBins.length || !fileBins.length) {
+        return { pairs: [], deltas: [], micPeak, filePeak, micThresh, fileThresh };
+      }
+      const pairSec = Math.min(0.75, Math.max(0.2, gapMatchErrorGate() * 2.5));
+      const pairs = [];
+      const deltas = [];
+      const usedFile = Object.create(null);
+      for (let m = 0; m < micBins.length; m++) {
+        const micSec = offsetSec + micBins[m] / ENVELOPE_RATE;
+        let best = null;
+        let bestAbs = 1e9;
+        let bestJ = -1;
+        for (let j = 0; j < fileBins.length; j++) {
+          if (usedFile[j]) continue;
+          const fileSec = offsetSec + fileBins[j] / ENVELOPE_RATE;
+          const d = Math.abs(fileSec - micSec);
+          if (d > pairSec) continue;
+          if (d < bestAbs) {
+            bestAbs = d;
+            best = fileSec;
+            bestJ = j;
+          }
+        }
+        if (best == null) continue;
+        usedFile[bestJ] = true;
+        const delta = best - micSec;
+        pairs.push({ micSec, fileSec: best, delta });
+        deltas.push(delta);
+      }
+      return { pairs, deltas, micPeak, filePeak, micThresh, fileThresh };
+    }
+
+    function resetFineTune() {
+      fineCrossSamples = [];
+      fineCrossPairs = [];
+      fineCrossFlash = null;
+      nextFinePollAt = 0;
+      nextFineApplyAt = 0;
+    }
+
+    function fineTuneLiveStats() {
+      if (!fineCrossSamples.length) return null;
+      const n = fineCrossSamples.length;
+      const spanSec = (fineCrossSamples[n - 1].at - fineCrossSamples[0].at) / 1000;
+      const deltas = fineCrossSamples.map(s => s.delta);
+      if (n === 1) {
+        return { avg: deltas[0], std: 0, kept: 1, dropped: 0, n, spanSec };
+      }
+      const stats = robustDeltaMean(deltas);
+      if (!stats) return { avg: null, std: null, kept: 0, dropped: n, n, spanSec };
+      return Object.assign({ n, spanSec }, stats);
+    }
+
+    function fineTuneMetaBit() {
+      if (!trackingLocked || !lockConfidenceOk()) return '';
+      const live = fineTuneLiveStats();
+      if (!live) {
+        if (fineCrossFlash && Date.now() < fineCrossFlash.until) {
+          return ' · fine applied ' + (fineCrossFlash.avg >= 0 ? '+' : '') +
+            fineCrossFlash.avg.toFixed(2) + 's';
+        }
+        return '';
+      }
+      const avgBit = live.avg != null
+        ? ('med ' + (live.avg >= 0 ? '+' : '') + live.avg.toFixed(2) + 's')
+        : 'med …';
+      return ' · fine ≥95% ' + live.n + '/' + Math.round(FINE_WINDOW_MS / 1000) +
+        's · ' + avgBit + ' · 20% crossings';
+    }
+
+    function pushFineDelta(delta) {
+      if (delta == null || !isFinite(delta)) return;
+      const now = Date.now();
+      fineCrossSamples.push({ at: now, delta });
+      const cutoff = now - FINE_WINDOW_MS;
+      while (fineCrossSamples.length && fineCrossSamples[0].at < cutoff) {
+        fineCrossSamples.shift();
+      }
+    }
+
+    // Feed ≥95% fine-tune from a matched Heard clip (spot) — clip vs track at 20% crossings.
+    function noteFineTuneFromClip(micEnv, offsetSec) {
+      if (!trackingLocked || !lockConfidenceOk()) return false;
+      const hit = crossingOffsetsAt20pct(micEnv, offsetSec);
+      fineCrossPairs = hit.pairs || [];
+      if (!hit.deltas || hit.deltas.length < 1) return false;
+      const stats = hit.deltas.length >= 2
+        ? robustDeltaMean(hit.deltas)
+        : { avg: hit.deltas[0], kept: 1, dropped: 0 };
+      if (!stats || stats.avg == null) return false;
+      pushFineDelta(stats.avg);
+      maybeApplyFineTune();
+      if (showDebug || showViz) renderFingerprintViz();
+      updateUI();
+      return true;
+    }
+
+    // Between spots: poll live mic envelope vs file at amp clock (still ≥95% only).
+    function maybeFineTunePoll() {
+      if (!trackingLocked || !lockConfidenceOk()) return;
+      if (!fileEnvelope || !fileEnvelope.length) return;
+      if (clipCollecting || clipBusy) return;
+      if (Date.now() < nextFinePollAt) return;
+      nextFinePollAt = Date.now() + FINE_POLL_MS;
+      const room = roomPosition();
+      const startSec = Math.max(0, room - FINE_POLL_SEC);
+      const i0 = Math.round(startSec * ENVELOPE_RATE);
+      const n = Math.max(8, Math.round(FINE_POLL_SEC * ENVELOPE_RATE));
+      if (i0 + n > fileEnvelope.length) return;
+      // Build mic env along file time from recent micEnvT/V.
+      const micEnv = new Float32Array(n);
+      let filled = 0;
+      for (let i = 0; i < n; i++) {
+        const fileT = startSec + i / ENVELOPE_RATE;
+        // Find nearest mic sample mapped onto file timeline.
+        let bestV = 0;
+        let bestD = 1e9;
+        for (let k = Math.max(0, micEnvT.length - 80); k < micEnvT.length; k++) {
+          const ft = micFileTime(micEnvT[k]);
+          if (ft == null) continue;
+          const d = Math.abs(ft - fileT);
+          if (d < bestD) {
+            bestD = d;
+            bestV = micEnvV[k];
+          }
+        }
+        if (bestD < 0.12) {
+          micEnv[i] = bestV;
+          filled++;
+        }
+      }
+      if (filled < n * 0.4) return;
+      noteFineTuneFromClip(micEnv, startSec);
+    }
+
+    function maybeApplyFineTune() {
+      if (!trackingLocked || !lockConfidenceOk()) return false;
+      if (Date.now() < nextFineApplyAt) return false;
+      if (fineCrossSamples.length < FINE_MIN_SAMPLES) return false;
+      const t0 = fineCrossSamples[0].at;
+      const t1 = fineCrossSamples[fineCrossSamples.length - 1].at;
+      if (t1 - t0 < FINE_WINDOW_MS) return false;
+      const deltas = fineCrossSamples.map(s => s.delta);
+      const n = deltas.length;
+      const spanSec = (t1 - t0) / 1000;
+      const stats = robustDeltaMean(deltas);
+      fineCrossSamples = [];
+      nextFineApplyAt = Date.now() + FINE_COOLDOWN_MS;
+      if (!stats || stats.avg == null) {
+        pushClipLog({
+          kind: 'spot',
+          at: Date.now(),
+          line: 'FINE skip · ' + n + ' / ' + spanSec.toFixed(0) +
+            's · 20% crossings · outliers boot · kept ' + (stats ? stats.kept : 0)
+        });
+        return false;
+      }
+      const avg = stats.avg;
+      const std = stats.std;
+      const maxStd = Math.max(0.2, gapMatchErrorGate() * 2);
+      const minAvg = burstSlipMinAvgSec();
+      const maxAvg = burstSlipMaxAvgSec();
+      if (std > maxStd) {
+        pushClipLog({
+          kind: 'spot',
+          at: Date.now(),
+          line: 'FINE skip · ' + stats.kept + '/' + n + ' / ' + spanSec.toFixed(0) +
+            's · avg ' + (avg >= 0 ? '+' : '') + avg.toFixed(2) +
+            's · σ ' + std.toFixed(2) + 's (inconsistent)'
+        });
+        return false;
+      }
+      if (Math.abs(avg) < minAvg || Math.abs(avg) > maxAvg) {
+        pushClipLog({
+          kind: 'spot',
+          at: Date.now(),
+          line: 'FINE skip · ' + stats.kept + '/' + n + ' / ' + spanSec.toFixed(0) +
+            's · avg ' + (avg >= 0 ? '+' : '') + avg.toFixed(2) +
+            's (gate ' + gapMatchErrorGate().toFixed(2) + 's · max ±' + maxAvg.toFixed(2) + 's)'
+        });
+        return false;
+      }
+      const room = roomPosition();
+      const target = room + avg;
+      slipAmpClock(target);
+      lastGoodOffset = target;
+      lastGoodPerf = performance.now() / 1000;
+      fineCrossFlash = { until: Date.now() + 3000, avg, targetSec: target };
+      lastSpotStatus = 'fine ' + (avg >= 0 ? '+' : '') + avg.toFixed(2) + 's';
+      pushClipLog({
+        kind: 'spot',
+        at: Date.now(),
+        line: 'FINE · ' + stats.kept + '/' + n + ' / ' + spanSec.toFixed(0) +
+          's · 20% crossings · avg ' + (avg >= 0 ? '+' : '') + avg.toFixed(2) +
+          's · σ ' + std.toFixed(2) + 's → amp@' + fmtTime(target) +
+          (stats.dropped ? (' · boot ' + stats.dropped) : '')
+      });
+      if (showDebug || showViz) renderFingerprintViz();
+      updateUI();
+      return true;
+    }
+
+    function drawFineCrossMarkers(fileCtx, micCtx, fw, fh, mw, mh, viewStart, windowSec, displayPeak) {
+      if (!trackingLocked || !lockConfidenceOk()) return;
+      if (displayPeak > 0) {
+        drawThreshLine(fileCtx, fw, fh, FINE_CROSS_FRAC, displayPeak, 'rgba(180, 90, 40, 0.45)');
+        if (micCtx) drawThreshLine(micCtx, mw, mh, FINE_CROSS_FRAC, displayPeak, 'rgba(180, 90, 40, 0.45)');
+      }
+      const pairs = fineCrossPairs || [];
+      for (let i = 0; i < pairs.length; i++) {
+        const p = pairs[i];
+        drawShortTick(fileCtx, fw, fh, p.fileSec - viewStart, windowSec, '#2a6f97', false);
+        if (micCtx) drawShortTick(micCtx, mw, mh, p.micSec - viewStart, windowSec, '#2a6f97', true);
+      }
+      const live = fineTuneLiveStats();
+      if (live && live.avg != null) {
+        drawViewportMarker(fileCtx, fw, fh, (roomPosition() + live.avg) - viewStart, windowSec, '#c45c26');
+      }
+      if (fineCrossFlash && Date.now() < fineCrossFlash.until) {
+        drawViewportMarker(fileCtx, fw, fh, fineCrossFlash.targetSec - viewStart, windowSec, '#c45c26');
+      }
     }
 
     function renderFingerprintViz() {
@@ -4729,15 +5022,31 @@
         const clipDur = clipEnv.length / ENVELOPE_RATE;
         drawShortTick(micDraw.ctx, micDraw.w, micDraw.h, clipEnvFileAt - viewStart, windowSec, '#2a6f97', false);
         drawShortTick(micDraw.ctx, micDraw.w, micDraw.h, clipEnvFileAt + clipDur - viewStart, windowSec, '#2a6f97', true);
+        drawFineCrossMarkers(
+          fileDraw.ctx, micDraw.ctx, fileDraw.w, fileDraw.h, micDraw.w, micDraw.h,
+          viewStart, windowSec, displayPeak
+        );
       } else if (heardYs && heardYs.length >= 2) {
         drawHeardWave(micCanvas, heardYs, '#1b6b45', displayPeak);
+        drawFineCrossMarkers(
+          fileDraw.ctx, null, fileDraw.w, fileDraw.h, fileDraw.w, fileDraw.h,
+          viewStart, windowSec, displayPeak
+        );
       } else if (scrolling && (trackingLocked || hasAlign)) {
         const live = micLiveSeries(viewStart, windowSec);
         const micDraw = paintEnvelope(micCanvas, '#1b6b45', mark, windowSec);
         drawEnvelopeSeries(micDraw.ctx, micDraw.w, micDraw.h, live.xs, live.ys, displayPeak, windowSec, '#1b6b45');
         if (mark != null) drawViewportMarker(micDraw.ctx, micDraw.w, micDraw.h, mark, windowSec, '#b54708');
+        drawFineCrossMarkers(
+          fileDraw.ctx, micDraw.ctx, fileDraw.w, fileDraw.h, micDraw.w, micDraw.h,
+          viewStart, windowSec, displayPeak
+        );
       } else {
         paintEnvelope(micCanvas, '#1b6b45', mark, windowSec);
+        drawFineCrossMarkers(
+          fileDraw.ctx, null, fileDraw.w, fileDraw.h, fileDraw.w, fileDraw.h,
+          viewStart, windowSec, displayPeak
+        );
       }
 
       const viewEnd = Math.min(dur, viewStart + windowSec);
@@ -4778,12 +5087,13 @@
       const scrollBit = scrolling && trackingLocked
         ? (' · scrolling @ amp ' + fmtTime(roomPosition()))
         : (scrolling ? (' · clock ' + fmtTime(roomPosition())) : '');
+      const fineBit = fineTuneMetaBit();
       $('fpMeta').textContent =
         (scrolling
           ? ('Window ' + windowSec.toFixed(0) + ' s · ')
           : ((view.origin > 0.05 ? ('From first sound @ ' + fmtTime(view.origin) + ' · ') : 'From start · '))) +
         (templateIndex ? (templateIndex.hashCount + ' peak-hashes') : 'no hashes') +
-        ' · clip ' + lastClipHits + ' hits' + scrollBit + alignBit + spotBit;
+        ' · clip ' + lastClipHits + ' hits' + scrollBit + alignBit + fineBit + spotBit;
     }
 
     function matchBurstSequence(micBursts, fileBurstList) {
@@ -5054,8 +5364,7 @@
       };
     }
 
-    // Soft-lock only (<95%). Strong locks leave the clock alone — fine-tune needs a
-    // proper redesign before running at ≥95% again.
+    // Soft-lock only (<95%). Strong locks use 20% crossing fine-tune instead.
     function noteBurstOnsetForSlip(rms) {
       if (!trackingLocked) {
         if (burstSlipOnsets.length) resetBurstSlip();
@@ -5358,6 +5667,7 @@
         if (heardSpeech && unexpectedSilenceMs === 0) inLogicalSync = true;
         if (trackingLocked) {
           noteBurstOnsetForSlip(rms);
+          maybeFineTunePoll();
           if (lockConfidenceOk()) maybeSpotCheck(rms);
           else maybeMicroAlign(rms);
         } else {
@@ -5426,11 +5736,12 @@
       silentTrackEligible = false; // fresh lock — normal tracking until it fails again
       resetBurstSlip();
       resetAmpVotes();
+      resetFineTune();
       // Seed the election with the lock hit so a good amp time starts with a mandate.
       castAmpElection(roomNow, lastMatchScore || LOCK_CONFIDENCE_OK, 'lock');
       nextBurstSlipAt = 0;
       lastSpotStatus = lockConfidenceOk()
-        ? ('locked ' + Math.round(lastMatchScore * 100) + '% · spot checks')
+        ? ('locked ' + Math.round(lastMatchScore * 100) + '% · spot checks + fine-tune')
         : ('locked ' + Math.round(lastMatchScore * 100) + '% · micro-align + burst slip');
       manualMissStreak = 0;
       // Grace period after lock — give the system time to stabilise before cutout can fire.
@@ -5647,6 +5958,7 @@
         silentTrackEligible = false;
         resetBurstSlip();
         resetAmpVotes();
+        resetFineTune();
         nextBurstSlipAt = 0;
         lastSpotStatus = '';
         startClipCapture();
@@ -5750,6 +6062,7 @@
       silentTrackEligible = false;
       resetBurstSlip();
       resetAmpVotes();
+      resetFineTune();
       nextBurstSlipAt = 0;
       lastSpotStatus = '';
       state.analysing = false;
