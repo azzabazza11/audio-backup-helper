@@ -804,7 +804,7 @@
     <button type="button" class="btn" id="btnForgetFingerprints" style="width:100%;margin-top:8px">Clear stored fingerprints</button>
   </details>
 
-  <p class="ver mono" id="appVer">v1.6.6 · 2026-08-21 21:18</p>
+  <p class="ver mono" id="appVer">v1.6.7 · 2026-08-21 21:24</p>
   <p class="ver-note" id="appVerNote" hidden>v1.6.5 · Heard local bars · coverage soft when score/idf pass · near-miss keeps streak</p>
 
   <div class="bottom-bar">
@@ -823,8 +823,8 @@
 
   <script>
     const $ = id => document.getElementById(id);
-    const APP_VER = '1.6.6';
-    const APP_BUILD = '2026-08-21 21:18';
+    const APP_VER = '1.6.7';
+    const APP_BUILD = '2026-08-21 21:24';
 
     const ENVELOPE_RATE = 20;
     const TRAIL_STEP_MS = 1000;
@@ -878,6 +878,13 @@
     const FP_BIN_Q = 3;
     const FP_HOP_SEC = FP_HOP / FP_SR;
     const SPOT_WAIT_MS = 60000;
+    const LOCK_CONFIDENCE_OK = 0.95; // ≥95% → spot checks only; below → micro-align
+    const MICRO_CLIP_MIN_SEC = 1.0;
+    const MICRO_CLIP_MAX_SEC = 2.0;
+    const MICRO_ALIGN_RADIUS_SEC = 3.5;
+    const MICRO_ALIGN_GAP_MS = 2200;
+    const MICRO_SLIP_MIN_SEC = 0.08;
+    const VIZ_DB_FLOOR = -42; // shared dB floor for track + heard comparison
     const SEEK_STEP_SEC = 10;
     const VOL_POPOVER_FADE_MS = 2200;
     const SEEK_RADIUS_SEC = 30;
@@ -1001,6 +1008,9 @@
     let micEnvT = [];
     let micEnvV = [];
     let spotMode = false;
+    let microAlignMode = false;
+    let nextMicroAt = 0;
+    let vizDisplayPeak = 0; // ratchet peak — never shrinks once set (silence won't zoom out)
     let spotFileStart = 0;
     let spotChecksDone = 0;
     let nextSpotAt = 0;
@@ -1836,6 +1846,12 @@
           return 'Tracking · listening for local match · trail preset ' + fmtTrailMs(effectiveTrailMs());
         }
         let line = 'Tracking · trail measured ' + fmtTrailMs(effectiveTrailMs());
+        if (!lockConfidenceOk()) {
+          line += ' · micro-align ' + Math.round(lastMatchScore * 100) + '% → 95%';
+          if (clipCollecting && microAlignMode) line += ' · recording 1–2s clip…';
+        } else if (clipCollecting && spotMode) {
+          line += ' · spot-checking…';
+        }
         if (lastSpotStatus) line += ' · ' + lastSpotStatus;
         if (!fileExpectsSpeech) return line + ' · file pause';
         if (unexpectedSilenceMs > 0) {
@@ -3051,7 +3067,8 @@
           if (!burstSilenceSince) burstSilenceSince = nowMs;
           const silentMs = nowMs - burstSilenceSince;
           const clipSec = clipLength / sr;
-          if (clipSec >= CLIP_MIN_SEC && silentMs >= BURST_TAIL_MS) {
+          const minSec = microAlignMode ? MICRO_CLIP_MIN_SEC : CLIP_MIN_SEC;
+          if (clipSec >= minSec && silentMs >= BURST_TAIL_MS) {
             finishClip();
             return;
           }
@@ -3059,8 +3076,9 @@
           burstSilenceSince = 0;
         }
 
-        // Hard max.
-        if (clipLength / sr >= CLIP_MAX_SEC) finishClip();
+        // Hard max (micro-align clips stay short for fine seek).
+        const maxSec = microAlignMode ? MICRO_CLIP_MAX_SEC : CLIP_MAX_SEC;
+        if (clipLength / sr >= maxSec) finishClip();
       };
     }
 
@@ -3131,7 +3149,7 @@
 
     function beginClipIfNeeded(rms) {
       if (!isClipMatchMode() || state.analysing || clipCollecting || clipBusy) return;
-      // After lock, only spot checks collect clips — regular matching is suppressed.
+      // After lock, micro-align / spot checks own clip collection.
       if (state.mode === 'manual' && trackingLocked) return;
       // Wait for the track clock to arm (decent amp signal) before matching.
       if (state.mode === 'manual' && !manualStartedAt) return;
@@ -3143,13 +3161,36 @@
       updateUI();
     }
 
+    function lockConfidenceOk() {
+      return lastMatchScore >= LOCK_CONFIDENCE_OK;
+    }
+
+    function maybeMicroAlign(rms) {
+      if ((state.mode !== 'armed' && state.mode !== 'manual') || !trackingLocked || !fileBuffer) return;
+      if (lockConfidenceOk()) return;
+      if (clipCollecting || clipBusy) return;
+      if (Date.now() < nextMicroAt) return;
+      if (!fileExpectsSpeech) return;
+      if (rms <= state.settings.silenceThreshold) return;
+      microAlignMode = true;
+      spotMode = false;
+      spotFileStart = roomPosition();
+      beginClipCollect();
+      lastClipStatus = 'recording';
+      lastSpotStatus = 'micro-align · confidence ' + Math.round(lastMatchScore * 100) + '%';
+      updateUI();
+    }
+
     function maybeSpotCheck(rms) {
       if ((state.mode !== 'armed' && state.mode !== 'manual') || !trackingLocked || !fileBuffer) return;
+      // Below 95%: micro-align instead of sparse spot checks.
+      if (!lockConfidenceOk()) return;
       if (clipCollecting || clipBusy) return;
       if (Date.now() < nextSpotAt) return;
       if (!fileExpectsSpeech) return;
       if (rms <= state.settings.silenceThreshold) return;
       spotMode = true;
+      microAlignMode = false;
       spotFileStart = roomPosition();
       beginClipCollect();
       updateUI();
@@ -3179,14 +3220,17 @@
       clipEnv = envelopeFromPcm(samples, sr);
       clipEnvFileAt = Math.max(0, roomPosition());
       const wasSpot = spotMode;
+      const wasMicro = microAlignMode;
       const wasCutoutVerify = cutoutVerifyMode;
       const spotStart = spotFileStart;
       spotMode = false;
+      microAlignMode = false;
       cutoutVerifyMode = false;
       if (showDebug || showViz) renderFingerprintViz();
       setTimeout(() => {
         try {
           if (wasCutoutVerify) applyCutoutVerifyMatch(samples, sr, spotStart, clipMs);
+          else if (wasMicro) applyMicroMatch(samples, sr, spotStart, clipMs);
           else if (wasSpot) applySpotMatch(samples, sr, spotStart, clipMs);
           else if (state.mode === 'cutout') applyCutoutRelock(samples, sr, clipMs);
           else if (state.mode === 'seeking') applySeekMatch(samples, sr, clipMs);
@@ -3436,6 +3480,84 @@
       const pattern = scoreSilencePattern(samples, sampleRate, result.offsetSec);
       Object.assign(result, pattern);
       applyClipMatch(result, clipMs);
+    }
+
+    function slipAmpClock(newSec) {
+      const sec = Math.max(0, newSec);
+      lockPositionSec = sec;
+      lockClockAt = Date.now();
+      manualBaseSec = sec;
+      manualStartedAt = Date.now();
+      alignFileAt = sec;
+      alignPerfAt = performance.now() / 1000;
+      hasAlign = true;
+    }
+
+    // Short 1–2 s clips after lock while confidence < 95% — fine-seek amp clock.
+    function applyMicroMatch(samples, sampleRate, fileStart, clipMs) {
+      nextMicroAt = Date.now() + MICRO_ALIGN_GAP_MS;
+      if ((state.mode !== 'armed' && state.mode !== 'manual') || !fileBuffer || !trackingLocked) {
+        lastSpotStatus = 'micro skipped';
+        updateUI();
+        return;
+      }
+      const radius = MICRO_ALIGN_RADIUS_SEC;
+      const winStart = Math.max(0, fileStart - radius);
+      const winDur = radius * 2 + Math.max(1, clipMs / 1000);
+      const result = matchClipToWindow(samples, sampleRate, winStart, winDur, clipMs);
+      clipEnv = envelopeFromPcm(samples, sampleRate);
+      if (!result || result.score === 0) {
+        clipEnvFileAt = Math.max(0, fileStart);
+        lastClipStatus = 'miss';
+        pushClipLog({
+          kind: 'miss',
+          at: Date.now(),
+          line: 'MICRO MISS @' + fmtTime(fileStart) + ' · ±' + radius.toFixed(1) + 's'
+        });
+        lastSpotStatus = 'micro miss · confidence ' + Math.round(lastMatchScore * 100) + '%';
+        updateUI();
+        return;
+      }
+      clipEnvFileAt = result.offsetSec;
+      const pattern = scoreSilencePattern(samples, sampleRate, result.offsetSec);
+      Object.assign(result, pattern);
+      const judged = judgeClip(result, clipMs);
+      const drift = result.offsetSec - fileStart;
+      lastMatchScore = result.score;
+      lastClipHits = Math.round(result.hits || 0);
+      lastClipOffset = result.offsetSec;
+      lastClipContrast = result.contrast || 0;
+      lastClipCoverage = judged.coverage;
+      lastClipGapScore = result.gapUsable ? result.gapScore : 0;
+      lastClipGapBit = result.gapUsable
+        ? ('gaps ' + Math.round(result.gapScore * 100) + '% (' + result.gapQuiet + '/' +
+          result.gapBins + ' quiet, blur ' + Math.round(result.gapBlurMs || 0) + ' ms)')
+        : 'gaps n/a';
+      noteStrongLock(judged, result, clipMs);
+      const base = formatClipLine(result, judged,
+        ' room@' + fmtTime(fileStart) + ' drift ' + drift.toFixed(2) + 's');
+      let slipped = 0;
+      const canSlip = (judged.ok || judged.nearMiss || result.score >= LOCK_CONFIDENCE_OK * 0.85) &&
+        Math.abs(drift) >= MICRO_SLIP_MIN_SEC && Math.abs(drift) <= radius;
+      if (canSlip) {
+        slipAmpClock(result.offsetSec);
+        slipped = drift;
+      }
+      const confPct = Math.round(lastMatchScore * 100);
+      pushClipLog({
+        kind: confPct >= LOCK_CONFIDENCE_OK * 100 ? 'lock' : 'spot',
+        at: Date.now(),
+        line: 'MICRO ' + (slipped ? ('SLIP ' + (slipped >= 0 ? '+' : '') + slipped.toFixed(2) + 's · ') : '') +
+          base + (lockConfidenceOk() ? ' · ≥95% → spot checks' : '')
+      });
+      lastClipStatus = judged.ok || judged.nearMiss ? 'hit' : 'miss';
+      lastSpotStatus = lockConfidenceOk()
+        ? ('micro OK · ' + confPct + '% · switching to spot checks')
+        : ('micro · ' + confPct + '%' + (slipped ? (' · slipped ' + (slipped >= 0 ? '+' : '') + slipped.toFixed(2) + 's') : ''));
+      if (lockConfidenceOk()) {
+        nextSpotAt = Date.now() + Math.min(SPOT_WAIT_MS, 15000);
+      }
+      updateUI();
     }
 
     function applySpotMatch(samples, sampleRate, fileStart, clipMs) {
@@ -3906,6 +4028,25 @@
       return p;
     }
 
+    // Ratchet display peak up only — silence must not zoom the track out again.
+    function noteVizDisplayPeak(peak) {
+      if (!(peak > 0.002)) return;
+      if (peak > vizDisplayPeak) vizDisplayPeak = peak;
+    }
+
+    function sharedVizPeak(fallback) {
+      const fb = Math.max(0.0001, fallback || 0.0001);
+      noteVizDisplayPeak(fb);
+      return vizDisplayPeak > 0.002 ? vizDisplayPeak : fb;
+    }
+
+    // Shared dB mapping so Track and Heard are comparable at the same zoom.
+    function ampToDisplay(v, peak) {
+      if (!peak || peak < 1e-8) return 0;
+      const db = 20 * Math.log10(Math.max(v, 1e-9) / peak);
+      return Math.max(0, Math.min(1, (db - VIZ_DB_FLOOR) / -VIZ_DB_FLOOR));
+    }
+
     function sizeFpCanvas(canvas) {
       const parent = canvas.parentElement;
       const w = Math.max(1, parent.clientWidth);
@@ -3934,7 +4075,7 @@
       for (let i = 0; i < xs.length; i++) {
         const x = xs[i] / windowSec * w;
         if (x < -4 || x > w + 4) continue;
-        const amp = Math.max(0, Math.min(1, ys[i] / peak));
+        const amp = ampToDisplay(ys[i], peak);
         pts.push({ x, y: h - pad - amp * usable });
       }
       if (pts.length < 2) return;
@@ -3963,14 +4104,15 @@
       ctx.globalAlpha = 1;
     }
 
-    // Heard lane: always draw the clip as a local full-width wave (never depends on file time).
-    function drawHeardWave(canvas, ys, color) {
+    // Heard lane: local full-width wave, scaled to the same peak as Track (dB).
+    function drawHeardWave(canvas, ys, color, sharedPeak) {
       const { w, h } = sizeFpCanvas(canvas);
       const ctx = canvas.getContext('2d');
       ctx.clearRect(0, 0, w, h);
       if (!ys || ys.length < 2) return;
-      let peak = 0.0001;
-      for (let i = 0; i < ys.length; i++) if (ys[i] > peak) peak = ys[i];
+      let localPeak = 0.0001;
+      for (let i = 0; i < ys.length; i++) if (ys[i] > localPeak) localPeak = ys[i];
+      const peak = sharedPeak > 0.002 ? sharedPeak : sharedVizPeak(localPeak);
       const dpr = Math.min(2, window.devicePixelRatio || 1);
       const pad = 4 * dpr;
       const usable = h - pad * 2;
@@ -3979,16 +4121,15 @@
       const barW = Math.max(1, slot * 0.72);
       ctx.fillStyle = color || '#1b6b45';
       for (let i = 0; i < n; i++) {
-        const amp = Math.max(0, Math.min(1, ys[i] / peak));
+        const amp = ampToDisplay(ys[i], peak);
         const bh = Math.max(2 * dpr, amp * usable);
         const x = i * slot + (slot - barW) * 0.5;
         ctx.globalAlpha = 0.55 + amp * 0.4;
         ctx.fillRect(x, h - pad - bh, barW, bh);
       }
-      // Crest stroke for shape.
       ctx.beginPath();
       for (let i = 0; i < n; i++) {
-        const amp = Math.max(0, Math.min(1, ys[i] / peak));
+        const amp = ampToDisplay(ys[i], peak);
         const x = i * slot + slot * 0.5;
         const y = h - pad - amp * usable;
         if (i === 0) ctx.moveTo(x, y);
@@ -4036,28 +4177,26 @@
       if (!fileCanvas || !micCanvas) return;
 
       const fileSeries = envelopeWindowSeries(fileEnvelope, viewStart, windowSec);
-      const filePeak = fileSeries.peak;
+      const displayPeak = sharedVizPeak(fileSeries.peak);
       const mark = scrolling
         ? view.playhead
         : (hasAlign ? (alignFileAt - view.origin) : null);
 
       const fileDraw = paintEnvelope(fileCanvas, '#123c32', mark, windowSec);
-      drawEnvelopeSeries(fileDraw.ctx, fileDraw.w, fileDraw.h, fileSeries.xs, fileSeries.ys, filePeak, windowSec, '#123c32');
+      drawEnvelopeSeries(fileDraw.ctx, fileDraw.w, fileDraw.h, fileSeries.xs, fileSeries.ys, displayPeak, windowSec, '#123c32');
       if (mark != null) drawViewportMarker(fileDraw.ctx, fileDraw.w, fileDraw.h, mark, windowSec, '#b54708');
       if (scrolling && view.playheadBackup != null) {
         drawViewportMarker(fileDraw.ctx, fileDraw.w, fileDraw.h, view.playheadBackup, windowSec, '#123c32');
       }
 
-      // Heard: prefer the current clip as a full-width local wave so it never vanishes off-screen.
+      // Heard: keep last/recording clip under Track, same dB peak for comparison.
       const heardYs = heardYsNow();
       if (heardYs && heardYs.length >= 2) {
-        drawHeardWave(micCanvas, heardYs, '#1b6b45');
+        drawHeardWave(micCanvas, heardYs, '#1b6b45', displayPeak);
       } else if (scrolling && (trackingLocked || hasAlign)) {
         const live = micLiveSeries(viewStart, windowSec);
         const micDraw = paintEnvelope(micCanvas, '#1b6b45', mark, windowSec);
-        const gain = Math.max(0.25, Math.min(8, filePeak / Math.max(live.peak, 0.0001)));
-        const scaled = live.ys.map(v => v * gain);
-        drawEnvelopeSeries(micDraw.ctx, micDraw.w, micDraw.h, live.xs, scaled, filePeak, windowSec, '#1b6b45');
+        drawEnvelopeSeries(micDraw.ctx, micDraw.w, micDraw.h, live.xs, live.ys, displayPeak, windowSec, '#1b6b45');
         if (mark != null) drawViewportMarker(micDraw.ctx, micDraw.w, micDraw.h, mark, windowSec, '#b54708');
       } else {
         paintEnvelope(micCanvas, '#1b6b45', mark, windowSec);
@@ -4065,18 +4204,25 @@
 
       const viewEnd = Math.min(dur, viewStart + windowSec);
       if (scrolling) {
-        $('fpFileLabel').textContent = 'Track · ' + fmtTime(viewStart) + ' – ' + fmtTime(viewEnd);
+        $('fpFileLabel').textContent = 'Track · ' + fmtTime(viewStart) + ' – ' + fmtTime(viewEnd) +
+          ' · dB peak locked';
       } else {
         $('fpFileLabel').textContent = view.origin > 0.05
           ? ('Fingerprint from ' + fmtTime(view.origin))
           : 'File fingerprint';
       }
       if (clipCollecting) {
-        $('fpMicLabel').textContent = 'Heard · recording…';
+        $('fpMicLabel').textContent = microAlignMode
+          ? 'Heard · micro-align recording…'
+          : (spotMode ? 'Heard · spot recording…' : 'Heard · recording…');
       } else if (clipEnv && clipEnv.length) {
-        $('fpMicLabel').textContent = 'Heard clip @ ' + fmtTime(clipEnvFileAt);
+        const conf = Math.round(lastMatchScore * 100);
+        $('fpMicLabel').textContent = trackingLocked
+          ? ('Heard clip @ ' + fmtTime(clipEnvFileAt) + ' · ' + conf + '%' +
+            (lockConfidenceOk() ? ' · spot mode' : ' · micro-align'))
+          : ('Heard clip @ ' + fmtTime(clipEnvFileAt));
       } else if (trackingLocked) {
-        $('fpMicLabel').textContent = 'Mic · live (follows amp)';
+        $('fpMicLabel').textContent = 'Heard · waiting for next clip';
       } else {
         $('fpMicLabel').textContent = 'Heard (waiting for clip)';
       }
@@ -4301,7 +4447,10 @@
         if (heardSpeech) lastSpeechAt = Date.now();
         noteUnexpectedSilence(fileExpectsSpeech, heardSpeech);
         if (heardSpeech && unexpectedSilenceMs === 0) inLogicalSync = true;
-        if (trackingLocked) maybeSpotCheck(rms);
+        if (trackingLocked) {
+          if (lockConfidenceOk()) maybeSpotCheck(rms);
+          else maybeMicroAlign(rms);
+        }
         checkCutout();
         tickPrimedViz();
       } else if (state.mode === 'cutout') {
@@ -4314,7 +4463,8 @@
         beginClipIfNeeded(rms);
         tickPrimedViz();
       } else if (state.mode === 'armed') {
-        maybeSpotCheck(rms);
+        if (lockConfidenceOk()) maybeSpotCheck(rms);
+        else maybeMicroAlign(rms);
         tickArmed(rms);
       }
 
@@ -4348,7 +4498,11 @@
       alignFileAt = roomNow;
       spotChecksDone = 0;
       nextSpotAt = Date.now() + SPOT_WAIT_MS;
-      lastSpotStatus = 'trail measured · spot check in ~1 min';
+      nextMicroAt = 0;
+      microAlignMode = false;
+      lastSpotStatus = lockConfidenceOk()
+        ? ('locked ' + Math.round(lastMatchScore * 100) + '% · spot checks')
+        : ('locked ' + Math.round(lastMatchScore * 100) + '% · micro-aligning toward 95%');
       manualMissStreak = 0;
       // Grace period after lock — give the system time to stabilise before cutout can fire.
       cutoutCooldownUntil = Date.now() + CUTOUT_COOLDOWN_MS;
@@ -4479,13 +4633,7 @@
       if (!trackingLocked || quietSec < 0.4) return 0;
       const slip = Math.min(10, Math.max(0.4, quietSec * 0.9));
       const nowRoom = roomPosition();
-      lockPositionSec = Math.max(0, nowRoom - slip);
-      lockClockAt = Date.now();
-      manualBaseSec = lockPositionSec;
-      manualStartedAt = Date.now();
-      alignFileAt = lockPositionSec;
-      alignPerfAt = performance.now() / 1000;
-      hasAlign = true;
+      slipAmpClock(Math.max(0, nowRoom - slip));
       return slip;
     }
 
@@ -4560,8 +4708,11 @@
         micEnvT = [];
         micEnvV = [];
         spotMode = false;
+        microAlignMode = false;
         spotChecksDone = 0;
         nextSpotAt = 0;
+        nextMicroAt = 0;
+        vizDisplayPeak = 0;
         lastSpotStatus = '';
         startClipCapture();
         if (!captureNode) throw new Error('This browser cannot capture mic clips for matching.');
@@ -4651,8 +4802,11 @@
       micEnvV = [];
       hasAlign = false;
       spotMode = false;
+      microAlignMode = false;
       spotChecksDone = 0;
       nextSpotAt = 0;
+      nextMicroAt = 0;
+      vizDisplayPeak = 0;
       lastSpotStatus = '';
       state.analysing = false;
 
