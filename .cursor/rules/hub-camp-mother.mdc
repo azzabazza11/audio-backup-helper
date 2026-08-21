@@ -1,30 +1,31 @@
 ---
-description: Keep hub.json version in lockstep with APP_VER for Aaron's Apps camp mother
+description: Keep APP_VER and hub.json.version locked for Aaron's Apps camp mother
 alwaysApply: true
 ---
 
 # Hub / camp mother version lock
 
-This app is listed on **Aaron's Apps** (`azzabazza11.github.io/apps/`). Camp mother syncs the hub card from this repo's `hub.json` — not from the live UI alone.
+Aaron's Apps **camp mother** reads this repo's root `hub.json` for the hub card badge. Do not edit `azzabazza11.github.io` catalog or fallbacks from this app repo.
 
-## Hard rule
+## When shipping any user-visible fix or feature
 
-Whenever you change the app version, update **both** in the same change:
+In the **same commit**:
 
-1. `APP_VER` / `APP_VERSION` / `const VERSION` in source (and any service-worker cache name that embeds the version)
-2. `hub.json` → `version` (must be identical string)
-3. Prepend a `changelog` entry in `hub.json` (`version`, `date` ISO `YYYY-MM-DD`, short `notes`)
+1. Bump `APP_VER` in `index.html` (and `docs/index.html` if mirrored).
+2. Bump `service-worker.js` / `docs/service-worker.js` `CACHE` to `back-me-up-vX.Y.Z` matching `APP_VER`.
+3. Set `hub.json` `version` to the **identical** string as `APP_VER` (no `v` prefix).
+4. Prepend `hub.json` `changelog[]` entry: `{ "version", "date": "YYYY-MM-DD", "notes" }` (one line).
+5. Update `README.md` Version line if present.
+6. Refresh `APP_BUILD` stamp (via `scripts/stamp-build.sh` or pre-commit hook).
 
-Never bump one without the other. Never edit `azzabazza11.github.io` catalog or packed-in fallbacks from this repo.
+Bump rules: **patch** = bugfix, **minor** = feature, **major** = breaking.
 
-## Version bump meaning
+## Never
 
-A **bump** is raising the version string for a shippable change (e.g. `1.6.3` → `1.6.4`). Use patch for fixes, minor for features, major only for breaking changes. The hub badge shows `hub.json.version`.
+- Change only `APP_VER` or only `hub.json.version`.
+- Sed / PR / push into `azzabazza11/azzabazza11.github.io` apps catalog from this repo.
+- Invent a hub badge version that is not `hub.json.version`.
 
-## After editing `hub.json`
+## Notify
 
-Prefer pushing so `.github/workflows/notify-hub.yml` can dispatch `hub-sync`. If that workflow/secret is missing, camp mother still polls hourly — or ping manually:
-
-```bash
-gh api -X POST repos/azzabazza11/azzabazza11.github.io/dispatches -f event_type=hub-sync
-```
+Pushing `hub.json` to `main` runs `.github/workflows/notify-hub.yml`, which dispatches `hub-sync` to the hub repo when `HUB_SYNC_TOKEN` or `HUB_TOKEN` is set. Otherwise camp mother polls hourly — still keep `hub.json` correct.

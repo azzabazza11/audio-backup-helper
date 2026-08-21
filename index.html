@@ -258,8 +258,8 @@
       display: flex;
       flex-direction: column;
       align-items: center;
-      gap: 10px;
-      padding: 14px 12px 12px;
+      gap: 8px;
+      padding: 16px 14px 12px;
       background: var(--paper);
       border: 1px solid var(--line);
       border-radius: 16px;
@@ -268,20 +268,57 @@
       opacity: 1;
       transition: opacity 0.45s ease;
       pointer-events: auto;
+      touch-action: none;
     }
     .vol-popover.fading { opacity: 0; pointer-events: none; }
     .vol-popover[hidden] { display: none !important; }
-    .vol-slider {
-      -webkit-appearance: slider-vertical;
-      appearance: slider-vertical;
-      writing-mode: vertical-lr;
-      direction: rtl;
-      width: 36px;
+    .vol-slider-wrap {
+      width: 44px;
       height: 160px;
-      padding: 0;
-      margin: 0;
-      accent-color: var(--accent);
+      display: flex;
+      align-items: center;
+      justify-content: center;
       touch-action: none;
+    }
+    .vol-slider {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 160px;
+      height: 36px;
+      margin: 0;
+      transform: rotate(-90deg);
+      transform-origin: center center;
+      background: transparent;
+      touch-action: none;
+      accent-color: var(--accent);
+    }
+    .vol-slider::-webkit-slider-runnable-track {
+      height: 8px;
+      border-radius: 999px;
+      background: var(--line);
+    }
+    .vol-slider::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 28px;
+      height: 28px;
+      margin-top: -10px;
+      border-radius: 50%;
+      background: var(--accent);
+      border: 2px solid var(--paper);
+      box-shadow: 0 1px 4px rgba(0,0,0,0.25);
+    }
+    .vol-slider::-moz-range-track {
+      height: 8px;
+      border-radius: 999px;
+      background: var(--line);
+    }
+    .vol-slider::-moz-range-thumb {
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      background: var(--accent);
+      border: 2px solid var(--paper);
     }
     .vol-label {
       font-size: 0.92rem;
@@ -293,7 +330,7 @@
     .vol-sub {
       font-size: 0.72rem;
       color: var(--muted);
-      margin-top: -6px;
+      margin-top: -2px;
     }
     .bottom-hint {
       margin: 0 0 8px; text-align: center;
@@ -350,7 +387,7 @@
     }
     .settings summary::-webkit-details-marker { display: none; }
     .settings summary .summary-label { flex: 1; }
-    .settings.locked summary { cursor: default; }
+    .settings.locked summary { cursor: pointer; }
     .btn-lock {
       min-height: 36px; min-width: 36px; padding: 0;
       border-radius: 10px; border: 1px solid var(--line);
@@ -656,7 +693,9 @@
       <button type="button" class="playback-btn" id="btnVol" aria-label="Volume" aria-pressed="false">Vol</button>
       <button type="button" class="playback-btn" id="btnSeekFwd" aria-label="Seek forward 10 seconds">+10s</button>
       <div class="vol-popover" id="volPopover" hidden>
-        <input type="range" class="vol-slider" id="volSlider" min="0" max="100" step="1" value="100" aria-label="Volume" />
+        <div class="vol-slider-wrap">
+          <input type="range" class="vol-slider" id="volSlider" min="0" max="100" step="1" value="100" aria-label="Volume" />
+        </div>
         <span class="mono vol-label" id="volLabel">100%</span>
         <span class="mono vol-sub" id="volDb">0.0 dB</span>
       </div>
@@ -700,7 +739,7 @@
   <details class="settings card" id="settingsPanel">
     <summary>
       <span class="summary-label">Settings</span>
-      <button type="button" class="btn-lock" id="btnSettingsLock" title="Pin settings open" aria-pressed="false" aria-label="Pin settings open">🔓</button>
+      <button type="button" class="btn-lock" id="btnSettingsLock" title="Lock settings controls" aria-pressed="false" aria-label="Lock settings controls">🔓</button>
     </summary>
     <div class="setting-row">
       <label for="bufferDelay">Buffer delay (backup trails the amp)</label>
@@ -709,7 +748,7 @@
     </div>
     <div class="setting-row">
       <label for="silenceThreshold">Mic silence (RMS below this = quiet)</label>
-      <input type="range" id="silenceThreshold" min="0.005" max="0.08" step="0.005" value="0.02" />
+      <input type="range" id="silenceThreshold" min="0.005" max="0.035" step="0.001" value="0.02" />
       <span class="val mono" id="silenceThresholdVal">0.02</span>
     </div>
     <div class="setting-row">
@@ -732,7 +771,7 @@
       <input type="range" id="matchThreshold" min="0.25" max="0.85" step="0.05" value="0.5" />
       <span class="val mono" id="matchThresholdVal">0.50</span>
     </div>
-    <p class="hint cal-hint" id="lockNeedHint">A clip is a hit only if rare-hash score, coverage of hashes that exist in the file, and file-pause quiet all pass. Lock needs two hits in a row plus the hold time. Talking should fail; the real file should pass by a wide margin.</p>
+    <p class="hint cal-hint" id="lockNeedHint">A clip is a hit when rare-hash score and idf pass. Coverage and file-pause quiet are soft when those already look good. Lock needs two hits in a row plus the hold time.</p>
     <div class="setting-row">
       <label for="confirmHold">Hold match before lock</label>
       <input type="range" id="confirmHold" min="3000" max="10000" step="500" value="5000" />
@@ -765,8 +804,8 @@
     <button type="button" class="btn" id="btnForgetFingerprints" style="width:100%;margin-top:8px">Clear stored fingerprints</button>
   </details>
 
-  <p class="ver mono" id="appVer">v1.6.4</p>
-  <p class="ver-note" id="appVerNote" hidden>Lock cleanup: clips need fileBuffer only · soft gaps · near-miss keeps streak · forward-wide search · playback transport in settings</p>
+  <p class="ver mono" id="appVer">v1.6.5 · 2026-08-21 20:40</p>
+  <p class="ver-note" id="appVerNote" hidden>v1.6.5 · Heard local bars · coverage soft when score/idf pass · near-miss keeps streak</p>
 
   <div class="bottom-bar">
     <p class="bottom-hint" id="mainBtnHint">Press to start tracking · Take Over when ready</p>
@@ -776,7 +815,7 @@
   <div class="overlay" id="cutoutOverlay" role="dialog" aria-labelledby="cutoutTitle">
     <div class="overlay-card">
       <h2 id="cutoutTitle">Main audio stopped</h2>
-      <p id="cutoutBody">Mic went quiet where this file still has speech. Listening for audio to return — or take over manually.</p>
+      <p id="cutoutBody">Mic went quiet where this file still has speech. If audio returns, listening resumes automatically — or take over manually.</p>
       <button type="button" class="btn primary" id="btnTakeOver">Take Over</button>
       <button type="button" class="btn" id="btnDismissCutout" style="margin-top:10px">Keep listening</button>
     </div>
@@ -784,7 +823,8 @@
 
   <script>
     const $ = id => document.getElementById(id);
-    const APP_VER = '1.6.4';
+    const APP_VER = '1.6.5';
+    const APP_BUILD = '2026-08-21 20:40';
 
     const ENVELOPE_RATE = 20;
     const TRAIL_STEP_MS = 1000;
@@ -799,7 +839,7 @@
     const FILE_LOOKAHEAD_SEC = 0.8;
     const CONFIRM_GRACE_MS = 2500;
     const MIN_LOCK_CLIPS = 2;
-    const MIN_CLIP_COVERAGE = 0.28;
+    const MIN_CLIP_COVERAGE = 0.18;
     const MIN_CLIP_CONTRAST = 4;
     const MIN_GAP_SCORE = 0.62;
     const MAX_CLOCK_DRIFT = 1.25;
@@ -822,7 +862,7 @@
     const HOLD_CONTINUE_RATIO = 0.7;
     const ALIGN_MATCH_FLOOR = 0.28;
     const SILENCE_MIN = 0.005;
-    const SILENCE_MAX = 0.08;
+    const SILENCE_MAX = 0.035;
     const AMBIENT_SAMPLES = 40;
     const AMBIENT_MULT = 2.4;
     const MIC_METER_MAX = 0.15;
@@ -836,7 +876,7 @@
     const FP_HOP_SEC = FP_HOP / FP_SR;
     const SPOT_WAIT_MS = 60000;
     const SEEK_STEP_SEC = 10;
-    const VOL_POPOVER_FADE_MS = 1600;
+    const VOL_POPOVER_FADE_MS = 2200;
     const SEEK_RADIUS_SEC = 30;
     const SEEK_WINDOW_MAX = 90;
     const SEEK_RADIUS_WIDE_SEC = 60;
@@ -888,6 +928,7 @@
     let cutoutVerifyMode = false;
     let cutoutVerifyStartedAt = 0;
     let cutoutRelockAttempts = 0;  // clips tried while overlay is showing
+    let cutoutSpeechSince = null;  // sustained audio while overlay is up
     let seekStopPos = 0;
     let seekStopAt = 0;
     let seekTemplate = null;
@@ -953,6 +994,7 @@
     let hasAlign = false;
     let clipEnv = null;
     let clipEnvFileAt = 0;
+    let liveClipEnv = [];
     let micEnvT = [];
     let micEnvV = [];
     let spotMode = false;
@@ -978,6 +1020,7 @@
     let playbackMuted = false;
     let playbackVolume = 1;
     let volHideTimer = null;
+    let volInteracting = false;
     const fpInflight = new Map();
 
     function fmtTime(sec) {
@@ -1528,7 +1571,8 @@
       const slider = $('volSlider');
       if (pctEl) pctEl.textContent = labels.pct;
       if (dbEl) dbEl.textContent = labels.db;
-      if (slider && document.activeElement !== slider) {
+      // Never rewrite the slider value while the user is dragging — that drops the touch.
+      if (slider && !volInteracting) {
         slider.value = String(Math.round(playbackVolume * 100));
       }
     }
@@ -1537,10 +1581,15 @@
       const pop = $('volPopover');
       const btn = $('btnVol');
       if (!pop) return;
+      if (volInteracting) return;
       if (volHideTimer) { clearTimeout(volHideTimer); volHideTimer = null; }
       if (fade && !pop.hidden) {
         pop.classList.add('fading');
         setTimeout(() => {
+          if (volInteracting) {
+            pop.classList.remove('fading');
+            return;
+          }
           pop.hidden = true;
           pop.classList.remove('fading');
         }, 450);
@@ -1555,6 +1604,7 @@
     }
 
     function scheduleVolPopoverHide() {
+      if (volInteracting) return;
       if (volHideTimer) clearTimeout(volHideTimer);
       volHideTimer = setTimeout(() => hideVolPopover(true), VOL_POPOVER_FADE_MS);
     }
@@ -1570,12 +1620,12 @@
         btn.setAttribute('aria-pressed', 'true');
       }
       updateVolPopoverLabels();
-      scheduleVolPopoverHide();
+      // Do not start the fade timer until the user finishes adjusting.
     }
 
     function toggleVolPopover() {
       const pop = $('volPopover');
-      if (!pop || pop.hidden) showVolPopover();
+      if (!pop || pop.hidden || pop.classList.contains('fading')) showVolPopover();
       else hideVolPopover(true);
     }
 
@@ -1593,10 +1643,7 @@
       playbackMuted = !playbackMuted;
       applyPlaybackVolume();
       updatePlaybackUi();
-      if (!$('volPopover').hidden) {
-        updateVolPopoverLabels();
-        scheduleVolPopoverHide();
-      }
+      if ($('volPopover') && !$('volPopover').hidden) updateVolPopoverLabels();
     }
 
     function setPlaybackVolumePct(pct) {
@@ -1604,17 +1651,26 @@
       if (playbackVolume > 0 && playbackMuted) playbackMuted = false;
       applyPlaybackVolume();
       updateVolPopoverLabels();
-      updatePlaybackUi();
-      scheduleVolPopoverHide();
+      const muteBtn = $('btnMute');
+      if (muteBtn) {
+        muteBtn.textContent = playbackMuted ? 'Unmute' : 'Mute';
+        muteBtn.classList.toggle('muted', playbackMuted);
+        muteBtn.setAttribute('aria-pressed', playbackMuted ? 'true' : 'false');
+      }
+    }
+
+    function isPlaybackTransportVisible() {
+      return state.mode === 'backing' && !!backupAudio && !backupAudio.paused;
     }
 
     function updatePlaybackUi() {
       const row = $('playbackRow');
       const muteBtn = $('btnMute');
       if (!row) return;
-      const show = state.mode === 'backing';
+      const show = isPlaybackTransportVisible();
       row.hidden = !show;
       if (!show) {
+        volInteracting = false;
         hideVolPopover(false);
         return;
       }
@@ -1623,14 +1679,14 @@
         muteBtn.classList.toggle('muted', playbackMuted);
         muteBtn.setAttribute('aria-pressed', playbackMuted ? 'true' : 'false');
       }
-      updateVolPopoverLabels();
+      if (!volInteracting) updateVolPopoverLabels();
     }
 
     function updateTrailUi() {
       const row = $('trailRow');
       const val = $('trailVal');
       if (!row || !val) return;
-      // Trail controls while tracking; playback transport replaces them during backup play.
+      // Trail while tracking; seek/mute/vol only while backup audio is playing.
       const showTrail = showsTrailRow() && state.mode !== 'backing';
       row.hidden = !showTrail;
       if (showTrail) {
@@ -1907,8 +1963,8 @@
           : 'Cutout · listening';
         const cb = $('cutoutBody');
         if (cb) cb.textContent = cutoutRelockAttempts > 0
-          ? 'Audio detected — trying to re-lock position (attempt ' + cutoutRelockAttempts + '). Will auto-dismiss if successful.'
-          : 'Mic went quiet where this file still has speech. Listening for audio to return — or take over manually.';
+          ? 'Audio detected — trying to re-lock (attempt ' + cutoutRelockAttempts + '). Overlay closes when speech holds.'
+          : 'Mic went quiet where this file still has speech. If audio returns, listening resumes automatically — or take over manually.';
         btn.textContent = 'Disarm';
         btn.className = 'btn';
         btn.disabled = false;
@@ -2040,7 +2096,7 @@
 
     function suggestedSilenceGate() {
       const raw = ambientRms * AMBIENT_MULT + 0.004;
-      const stepped = Math.round(raw / 0.005) * 0.005;
+      const stepped = Math.round(raw / 0.001) * 0.001;
       return Math.min(SILENCE_MAX, Math.max(SILENCE_MIN, stepped));
     }
 
@@ -2431,13 +2487,21 @@
       if (found < needFound) {
         hard.push('only ' + found + ' clip hashes exist in the file (need ≥ ' + needFound + ')');
       }
-      // Allow lower coverage when score and idf are both very high — sparse-hash tracks.
-      const coverageFloor = (score >= 0.95 && result.hits >= needHits * 1.5)
-        ? MIN_CLIP_COVERAGE * 0.6
+      // Coverage: soft when core hash gates already pass (sparse / long tiles often sit ~15–25%).
+      const coverageFloor = (score >= 0.90 && result.hits >= needHits)
+        ? MIN_CLIP_COVERAGE * 0.7
         : MIN_CLIP_COVERAGE;
+      const coreOk =
+        score >= state.settings.matchThreshold &&
+        result.hits >= needHits &&
+        (result.contrast || 0) >= MIN_CLIP_CONTRAST &&
+        found >= needFound &&
+        (result.hashes || 0) >= 8;
       if (coverage < coverageFloor) {
-        hard.push('cover ' + Math.round(coverage * 100) + '% of matched hashes < ' +
-          Math.round(coverageFloor * 100) + '%');
+        const msg = 'cover ' + Math.round(coverage * 100) + '% of matched hashes < ' +
+          Math.round(coverageFloor * 100) + '%' + (coreOk ? ' (soft)' : '');
+        if (coreOk) soft.push(msg);
+        else hard.push(msg);
       }
       // Gaps are soft: room noise in pauses lowers confidence but does not veto a hit.
       if (result.gapUsable && result.gapScore < MIN_GAP_SCORE) {
@@ -2446,7 +2510,7 @@
       }
       if ((result.hashes || 0) < 8) hard.push('too few peaks in clip');
       const ok = hard.length === 0;
-      // Near-miss: close on hard gates (score almost there, or only coverage short).
+      // Near-miss: close on hard gates (score almost there, or only soft leftovers).
       const nearMiss = !ok && score >= state.settings.matchThreshold * 0.85 &&
         hard.length <= 2 &&
         !(result.hashes < 8);
@@ -2462,6 +2526,11 @@
         btn.title = showViz ? 'Hide fingerprint' : 'Show fingerprint';
       }
       if (showDebug || showViz) renderFingerprintViz();
+    }
+
+    function applyVersionUi() {
+      const el = $('appVer');
+      if (el) el.textContent = 'v' + APP_VER + ' · ' + APP_BUILD;
     }
 
     function applyDebugUi() {
@@ -2487,12 +2556,12 @@
       const btn = $('btnSettingsLock');
       if (!panel || !btn) return;
       panel.classList.toggle('locked', settingsLocked);
-      if (settingsLocked) panel.open = true;
+      // Lock only freezes controls — panel can still expand/collapse.
       btn.classList.toggle('on', settingsLocked);
       btn.textContent = settingsLocked ? '🔒' : '🔓';
-      btn.title = settingsLocked ? 'Unlock settings' : 'Lock settings';
+      btn.title = settingsLocked ? 'Unlock settings controls' : 'Lock settings controls';
       btn.setAttribute('aria-pressed', settingsLocked ? 'true' : 'false');
-      // Disable/enable all inputs and buttons inside settings (except the lock button itself).
+      btn.setAttribute('aria-label', btn.title);
       panel.querySelectorAll('input, select, button:not(#btnSettingsLock)').forEach(el => {
         el.disabled = settingsLocked;
       });
@@ -2653,7 +2722,7 @@
       const scoreHits = Math.ceil(state.settings.matchThreshold * scoreNeedHits());
       return 'Hit needs score ≥ ' + state.settings.matchThreshold.toFixed(2) +
         ' (~' + scoreHits + ' rare hashes) · ≥ ' + needHits + ' idf · ×' + MIN_CLIP_CONTRAST +
-        ' contrast · ' + Math.round(MIN_CLIP_COVERAGE * 100) + '% of hashes that exist in the file · ' +
+        ' contrast · cover soft when score/idf pass (≥ ' + Math.round(MIN_CLIP_COVERAGE * 100) + '% preferred) · ' +
         'file pauses soft-checked (≥ ' + Math.round(MIN_GAP_SCORE * 100) + '% quiet preferred, blur ' +
         Math.round(state.settings.patternBlurMs) + ' ms) · ' +
         MIN_LOCK_CLIPS + ' clips in a row that follow the file clock · ' +
@@ -2750,7 +2819,7 @@
     function diagnosticText() {
       const track = selectedTrack();
       const lines = [
-        'Back Me Up diagnostics v' + APP_VER,
+        'Back Me Up diagnostics v' + APP_VER + ' · build ' + APP_BUILD,
         new Date().toISOString(),
         'mode=' + state.mode + (trackingLocked ? ' locked' : ''),
         'track=' + (track ? track.name : '(none)'),
@@ -2934,9 +3003,8 @@
       prerollHead = 0;
 
       captureNode.onaudioprocess = ev => {
-        const activeMode = state.mode === 'primed' || state.mode === 'manual' ||
-          state.mode === 'armed' || state.mode === 'seeking';
-        if (!activeMode) return;
+        // Must include cutout — otherwise re-lock clips never collect samples.
+        if (!isClipMatchMode() && state.mode !== 'armed') return;
 
         const data = ev.inputBuffer.getChannelData(0);
 
@@ -2957,6 +3025,10 @@
         chunkRms = Math.sqrt(chunkRms / data.length);
         const gate = state.settings.silenceThreshold;
         const nowMs = Date.now();
+
+        // Live Heard envelope — one bin per audio chunk while recording.
+        liveClipEnv.push(chunkRms);
+        if (liveClipEnv.length > ENVELOPE_RATE * CLIP_MAX_SEC) liveClipEnv.shift();
 
         if (chunkRms <= gate) {
           if (!burstSilenceSince) burstSilenceSince = nowMs;
@@ -2990,11 +3062,13 @@
       prerollBuf = null;
       prerollHead = 0;
       burstSilenceSince = 0;
+      liveClipEnv = [];
     }
 
     function beginClipCollect() {
       clipCollecting = true;
       burstSilenceSince = 0;
+      liveClipEnv = [];
       lastClipPerfStart = performance.now() / 1000;
       // Prepend pre-roll so we capture from burst start, not mid-word.
       if (prerollBuf && prerollHead > 0) {
@@ -3006,10 +3080,16 @@
         }
         clipParts = [pre];
         clipLength = filled;
+        // Seed live envelope from pre-roll RMS.
+        let sum = 0;
+        for (let i = 0; i < filled; i++) sum += pre[i] * pre[i];
+        liveClipEnv.push(Math.sqrt(sum / Math.max(1, filled)));
       } else {
         clipParts = [];
         clipLength = 0;
       }
+      // Provisional placement near the user clock so Heard is visible before match.
+      clipEnvFileAt = Math.max(0, roomPosition());
     }
 
     function beginClipIfNeeded(rms) {
@@ -3054,12 +3134,17 @@
       }
       clipParts = [];
       clipLength = 0;
+      liveClipEnv = [];
       const clipMs = collected / sr * 1000;
+      // Always show Heard immediately — even if matching later fails or finds nothing.
+      clipEnv = envelopeFromPcm(samples, sr);
+      clipEnvFileAt = Math.max(0, roomPosition());
       const wasSpot = spotMode;
       const wasCutoutVerify = cutoutVerifyMode;
       const spotStart = spotFileStart;
       spotMode = false;
       cutoutVerifyMode = false;
+      if (showDebug || showViz) renderFingerprintViz();
       setTimeout(() => {
         try {
           if (wasCutoutVerify) applyCutoutVerifyMatch(samples, sr, spotStart, clipMs);
@@ -3067,10 +3152,10 @@
           else if (state.mode === 'cutout') applyCutoutRelock(samples, sr, clipMs);
           else if (state.mode === 'seeking') applySeekMatch(samples, sr, clipMs);
           else if (state.mode === 'manual') applyManualMatch(samples, sr, clipMs);
-          else {
+          else if (fileBuffer) applyManualMatch(samples, sr, clipMs);
+          else if (templateIndex) {
             const result = matchClipToTemplate(samples, sr, templateIndex);
             result.offsetSec = templateOriginSec() + result.offsetSec;
-            clipEnv = envelopeFromPcm(samples, sr);
             clipEnvFileAt = result.offsetSec;
             const pattern = scoreSilencePattern(samples, sr, result.offsetSec);
             applyClipMatch(Object.assign(result, pattern), clipMs);
@@ -3153,8 +3238,7 @@
           Math.abs(result.offsetSec - lastHitOffset) < 10;
         const nearMiss = judged.nearMiss && nearPos;
         if (nearMiss) {
-          // Soft miss: keep some streak so one weak clip does not wipe a good lock path.
-          hitStreak = Math.max(0, hitStreak - 1);
+          // Soft miss: keep streak — do not wipe a good lock path on one weak clip.
           pushClipLog({
             kind: 'miss',
             at: Date.now(),
@@ -3253,15 +3337,16 @@
       const drift = Math.abs(result.offsetSec - room);
       const base = formatClipLine(result, judged,
         ' room@' + fmtTime(room) + ' new@' + fmtTime(result.offsetSec) + ' drift ' + drift.toFixed(1) + 's');
-      if (!judged.ok) {
+      if (!judged.ok && !judged.nearMiss) {
         pushClipLog({ kind: 'miss', at: Date.now(),
           line: 'CUTOUT RELOCK WEAK attempt ' + cutoutRelockAttempts + ' · ' + base + ' · ' + judged.reasons.join(' · ') });
         updateUI();
         return;
       }
-      // Good match — re-lock to the new position and auto-dismiss the overlay.
+      // Good or near-miss match — re-lock and dismiss the overlay.
       pushClipLog({ kind: 'lock', at: Date.now(),
-        line: 'CUTOUT RELOCK OK attempt ' + cutoutRelockAttempts + ' · ' + base });
+        line: 'CUTOUT RELOCK OK attempt ' + cutoutRelockAttempts +
+          (judged.nearMiss && !judged.ok ? ' (near)' : '') + ' · ' + base });
       // Recalculate trail relative to the new file position.
       const backupNow = manualClockSec();
       const newRoom = result.offsetSec;
@@ -3663,6 +3748,22 @@
         };
       }
 
+      // Before lock, keep the view near the user clock so Heard clips stay on-screen.
+      if (state.mode === 'manual' || state.mode === 'cutout') {
+        const center = Math.max(0, roomPosition());
+        let start = center - windowSec * FP_SCROLL_LEAD;
+        if (start + windowSec > dur) start = Math.max(0, dur - windowSec);
+        start = Math.max(0, start);
+        return {
+          start,
+          windowSec,
+          scrolling: true,
+          playhead: center - start,
+          playheadBackup: null,
+          origin
+        };
+      }
+
       if (state.mode === 'seeking') {
         const win = seekWindow();
         const span = Math.max(windowSec, win.dur);
@@ -3778,30 +3879,89 @@
       const { w, h } = sizeFpCanvas(canvas);
       const ctx = canvas.getContext('2d');
       ctx.clearRect(0, 0, w, h);
-      ctx.fillStyle = color;
-      return { ctx, w, h, markerSec, windowSec };
+      return { ctx, w, h, markerSec, windowSec, color };
     }
 
-    function drawEnvelopeSeries(ctx, w, h, xs, ys, peak, windowSec) {
-      if (!xs.length || !windowSec) return;
-      const pad = 4 * (window.devicePixelRatio || 1);
+    function drawEnvelopeSeries(ctx, w, h, xs, ys, peak, windowSec, color) {
+      if (!xs.length || !windowSec || !peak) return;
+      const dpr = Math.min(2, window.devicePixelRatio || 1);
+      const pad = 4 * dpr;
       const usable = h - pad * 2;
-      ctx.beginPath();
-      ctx.moveTo(0, h - pad);
-      let started = false;
+      const pts = [];
       for (let i = 0; i < xs.length; i++) {
         const x = xs[i] / windowSec * w;
-        if (x < -2 || x > w + 2) continue;
-        const y = h - pad - Math.max(0, ys[i] / peak) * usable;
-        if (!started) { ctx.lineTo(x, h - pad); ctx.lineTo(x, y); started = true; }
+        if (x < -4 || x > w + 4) continue;
+        const amp = Math.max(0, Math.min(1, ys[i] / peak));
+        pts.push({ x, y: h - pad - amp * usable });
+      }
+      if (pts.length < 2) return;
+
+      const x0 = pts[0].x;
+      const x1 = pts[pts.length - 1].x;
+
+      ctx.beginPath();
+      ctx.moveTo(x0, h - pad);
+      for (let i = 0; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+      ctx.lineTo(x1, h - pad);
+      ctx.closePath();
+      ctx.fillStyle = color || '#123c32';
+      ctx.globalAlpha = 0.35;
+      ctx.fill();
+
+      ctx.beginPath();
+      ctx.moveTo(pts[0].x, pts[0].y);
+      for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+      ctx.strokeStyle = color || '#123c32';
+      ctx.lineWidth = Math.max(1.5, 1.25 * dpr);
+      ctx.lineJoin = 'round';
+      ctx.lineCap = 'round';
+      ctx.globalAlpha = 0.95;
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+
+    // Heard lane: always draw the clip as a local full-width wave (never depends on file time).
+    function drawHeardWave(canvas, ys, color) {
+      const { w, h } = sizeFpCanvas(canvas);
+      const ctx = canvas.getContext('2d');
+      ctx.clearRect(0, 0, w, h);
+      if (!ys || ys.length < 2) return;
+      let peak = 0.0001;
+      for (let i = 0; i < ys.length; i++) if (ys[i] > peak) peak = ys[i];
+      const dpr = Math.min(2, window.devicePixelRatio || 1);
+      const pad = 4 * dpr;
+      const usable = h - pad * 2;
+      const n = ys.length;
+      const slot = w / n;
+      const barW = Math.max(1, slot * 0.72);
+      ctx.fillStyle = color || '#1b6b45';
+      for (let i = 0; i < n; i++) {
+        const amp = Math.max(0, Math.min(1, ys[i] / peak));
+        const bh = Math.max(2 * dpr, amp * usable);
+        const x = i * slot + (slot - barW) * 0.5;
+        ctx.globalAlpha = 0.55 + amp * 0.4;
+        ctx.fillRect(x, h - pad - bh, barW, bh);
+      }
+      // Crest stroke for shape.
+      ctx.beginPath();
+      for (let i = 0; i < n; i++) {
+        const amp = Math.max(0, Math.min(1, ys[i] / peak));
+        const x = i * slot + slot * 0.5;
+        const y = h - pad - amp * usable;
+        if (i === 0) ctx.moveTo(x, y);
         else ctx.lineTo(x, y);
       }
-      if (!started) return;
-      ctx.lineTo(w, h - pad);
-      ctx.closePath();
-      ctx.globalAlpha = 0.88;
-      ctx.fill();
+      ctx.strokeStyle = color || '#1b6b45';
+      ctx.lineWidth = Math.max(1.5, 1.4 * dpr);
+      ctx.lineJoin = 'round';
       ctx.globalAlpha = 1;
+      ctx.stroke();
+    }
+
+    function heardYsNow() {
+      if (clipCollecting && liveClipEnv.length) return liveClipEnv.slice();
+      if (clipEnv && clipEnv.length) return Array.from(clipEnv);
+      return null;
     }
 
     function drawViewportMarker(ctx, w, h, sec, windowSec, color) {
@@ -3834,71 +3994,55 @@
 
       const fileSeries = envelopeWindowSeries(fileEnvelope, viewStart, windowSec);
       const filePeak = fileSeries.peak;
-
-      let micXs = [];
-      let micYs = [];
-      let micPeak = 0.0001;
-      if (scrolling && (trackingLocked || hasAlign)) {
-        const live = micLiveSeries(viewStart, windowSec);
-        micXs = live.xs;
-        micYs = live.ys;
-        micPeak = live.peak;
-      } else if (clipEnv && clipEnv.length) {
-        const clipStart = scrolling ? viewStart : view.origin;
-        for (let i = 0; i < clipEnv.length; i++) {
-          micXs.push(clipEnvFileAt + i / ENVELOPE_RATE - clipStart);
-          micYs.push(clipEnv[i]);
-          if (clipEnv[i] > micPeak) micPeak = clipEnv[i];
-        }
-      }
-      const gain = Math.max(0.25, Math.min(8, filePeak / micPeak));
       const mark = scrolling
         ? view.playhead
         : (hasAlign ? (alignFileAt - view.origin) : null);
 
       const fileDraw = paintEnvelope(fileCanvas, '#123c32', mark, windowSec);
-      drawEnvelopeSeries(fileDraw.ctx, fileDraw.w, fileDraw.h, fileSeries.xs, fileSeries.ys, filePeak, windowSec);
+      drawEnvelopeSeries(fileDraw.ctx, fileDraw.w, fileDraw.h, fileSeries.xs, fileSeries.ys, filePeak, windowSec, '#123c32');
       if (mark != null) drawViewportMarker(fileDraw.ctx, fileDraw.w, fileDraw.h, mark, windowSec, '#b54708');
       if (scrolling && view.playheadBackup != null) {
         drawViewportMarker(fileDraw.ctx, fileDraw.w, fileDraw.h, view.playheadBackup, windowSec, '#123c32');
       }
 
-      const micDraw = paintEnvelope(micCanvas, '#1b6b45', mark, windowSec);
-      const scaled = micYs.map(v => v * gain);
-      drawEnvelopeSeries(micDraw.ctx, micDraw.w, micDraw.h, micXs, scaled, filePeak, windowSec);
-      if (scrolling && clipEnv && clipEnv.length && clipCollecting) {
-        const clip = clipOverlaySeries(viewStart);
-        const clipScaled = clip.ys.map(v => v * Math.max(0.25, Math.min(8, filePeak / clip.peak)));
-        drawEnvelopeSeries(micDraw.ctx, micDraw.w, micDraw.h, clip.xs, clipScaled, filePeak, windowSec);
+      // Heard: prefer the current clip as a full-width local wave so it never vanishes off-screen.
+      const heardYs = heardYsNow();
+      if (heardYs && heardYs.length >= 2) {
+        drawHeardWave(micCanvas, heardYs, '#1b6b45');
+      } else if (scrolling && (trackingLocked || hasAlign)) {
+        const live = micLiveSeries(viewStart, windowSec);
+        const micDraw = paintEnvelope(micCanvas, '#1b6b45', mark, windowSec);
+        const gain = Math.max(0.25, Math.min(8, filePeak / Math.max(live.peak, 0.0001)));
+        const scaled = live.ys.map(v => v * gain);
+        drawEnvelopeSeries(micDraw.ctx, micDraw.w, micDraw.h, live.xs, scaled, filePeak, windowSec, '#1b6b45');
+        if (mark != null) drawViewportMarker(micDraw.ctx, micDraw.w, micDraw.h, mark, windowSec, '#b54708');
+      } else {
+        paintEnvelope(micCanvas, '#1b6b45', mark, windowSec);
       }
-      if (mark != null) drawViewportMarker(micDraw.ctx, micDraw.w, micDraw.h, mark, windowSec, '#b54708');
 
       const viewEnd = Math.min(dur, viewStart + windowSec);
       if (scrolling) {
         $('fpFileLabel').textContent = 'Track · ' + fmtTime(viewStart) + ' – ' + fmtTime(viewEnd);
-        if (trackingLocked) {
-          $('fpMicLabel').textContent = clipCollecting
-            ? 'Mic · live (recording clip)'
-            : 'Mic · live (follows amp)';
-        } else {
-          $('fpMicLabel').textContent = clipCollecting
-            ? 'Mic · heard near ' + fmtTime(seekWindow().center)
-            : 'Mic · watching for amp';
-        }
       } else {
         $('fpFileLabel').textContent = view.origin > 0.05
           ? ('Fingerprint from ' + fmtTime(view.origin))
           : 'File fingerprint';
-        $('fpMicLabel').textContent = clipCollecting
-          ? 'Heard clip (recording…)'
-          : (clipEnv ? ('Heard clip @ ' + fmtTime(clipEnvFileAt)) : 'Heard clip (waiting)');
+      }
+      if (clipCollecting) {
+        $('fpMicLabel').textContent = 'Heard · recording…';
+      } else if (clipEnv && clipEnv.length) {
+        $('fpMicLabel').textContent = 'Heard clip @ ' + fmtTime(clipEnvFileAt);
+      } else if (trackingLocked) {
+        $('fpMicLabel').textContent = 'Mic · live (follows amp)';
+      } else {
+        $('fpMicLabel').textContent = 'Heard (waiting for clip)';
       }
 
       const alignBit = hasAlign ? (' · lined up @ ' + fmtTime(alignFileAt)) : '';
       const spotBit = lastSpotStatus ? (' · ' + lastSpotStatus) : '';
       const scrollBit = scrolling && trackingLocked
         ? (' · scrolling @ amp ' + fmtTime(roomPosition()))
-        : (scrolling ? (' · seeking ' + fmtTime(seekWindow().center)) : '');
+        : (scrolling ? (' · clock ' + fmtTime(roomPosition())) : '');
       $('fpMeta').textContent =
         (scrolling
           ? ('Window ' + windowSec.toFixed(0) + ' s · ')
@@ -4056,8 +4200,10 @@
         checkCutout();
         tickPrimedViz();
       } else if (state.mode === 'cutout') {
-        // Audio returned while overlay is showing — try to re-lock automatically.
+        // Audio returned — collect clips to re-lock, and auto-dismiss overlay if speech holds.
         beginClipIfNeeded(rms);
+        const heardSpeech = rms > state.settings.silenceThreshold || !!liveBurst;
+        maybeAutoResumeFromCutout(heardSpeech);
         tickPrimedViz();
       } else if (state.mode === 'seeking') {
         beginClipIfNeeded(rms);
@@ -4118,6 +4264,7 @@
       cutoutVerifyMode = false;
       cutoutVerifyStartedAt = 0;
       cutoutRelockAttempts = 0;
+      cutoutSpeechSince = null;
     }
 
     function noteUnexpectedSilence(fileExpects, heardSpeech) {
@@ -4192,6 +4339,7 @@
       // Halve strong-lock credit — position may be drifted; earn trust back after re-lock.
       strongLockMs = Math.max(0, strongLockMs * 0.5);
       cutoutRelockAttempts = 0;
+      cutoutSpeechSince = null;
       pushClipLog({
         kind: 'miss',
         at: Date.now(),
@@ -4201,6 +4349,22 @@
           ' · strong ' + (strongLockMs / 1000).toFixed(1) + 's'
       });
       setMode('cutout');
+    }
+
+    // If amp audio returns while the Take Over overlay is up, step back to listening
+    // automatically — same as Keep listening, without waiting for a full re-lock match.
+    function maybeAutoResumeFromCutout(heardSpeech) {
+      if (state.mode !== 'cutout') return;
+      if (heardSpeech) {
+        if (!cutoutSpeechSince) cutoutSpeechSince = Date.now();
+        const held = Date.now() - cutoutSpeechSince;
+        if (held >= CUTOUT_BLIP_MS) {
+          cutoutSpeechSince = null;
+          dismissCutout(true);
+        }
+      } else {
+        cutoutSpeechSince = null;
+      }
     }
 
     async function requestWakeLock() {
@@ -4469,22 +4633,24 @@
       renderTriggerLog();
     }
 
-    function dismissCutout() {
+    function dismissCutout(auto) {
       pushClipLog({
         kind: 'spot',
         at: Date.now(),
-        line: 'KEEP LISTENING amp@' + fmtTime(roomPosition()) + ' · tracking resumed'
+        line: (auto ? 'AUTO KEEP LISTENING' : 'KEEP LISTENING') +
+          ' amp@' + fmtTime(roomPosition()) + ' · tracking resumed'
       });
       unexpectedSilenceMs = 0;
       micSpeechStartedAt = null;
       silenceSince = null;
+      cutoutSpeechSince = null;
       lastSpeechAt = Date.now();
       inLogicalSync = true;
       cutoutVerifyPending = false;
       cutoutVerifyStartedAt = 0;
       cutoutRelockAttempts = 0;
       cutoutCooldownUntil = Date.now() + CUTOUT_COOLDOWN_MS;
-      lastSpotStatus = 'tracking resumed';
+      lastSpotStatus = auto ? 'audio returned · listening again' : 'tracking resumed';
       setMode('manual');
       if (!listenTimer) listenTimer = setInterval(tickListen, LISTEN_MS);
       updateUI();
@@ -4513,21 +4679,46 @@
     $('btnSeekFwd').addEventListener('click', () => seekPlayback(SEEK_STEP_SEC));
     $('btnMute').addEventListener('click', () => togglePlaybackMute());
     $('btnVol').addEventListener('click', e => {
+      e.preventDefault();
       e.stopPropagation();
       toggleVolPopover();
     });
-    $('volSlider').addEventListener('input', e => {
+    const volSlider = $('volSlider');
+    const volPopover = $('volPopover');
+    function beginVolInteract(e) {
+      if (e) e.stopPropagation();
+      volInteracting = true;
+      if (volHideTimer) { clearTimeout(volHideTimer); volHideTimer = null; }
+      const pop = $('volPopover');
+      if (pop) pop.classList.remove('fading');
+    }
+    function endVolInteract() {
+      volInteracting = false;
+      scheduleVolPopoverHide();
+    }
+    volSlider.addEventListener('pointerdown', beginVolInteract);
+    volSlider.addEventListener('pointerup', endVolInteract);
+    volSlider.addEventListener('pointercancel', endVolInteract);
+    volSlider.addEventListener('touchstart', beginVolInteract, { passive: true });
+    volSlider.addEventListener('touchend', endVolInteract);
+    volSlider.addEventListener('input', e => {
+      volInteracting = true;
+      if (volHideTimer) { clearTimeout(volHideTimer); volHideTimer = null; }
       setPlaybackVolumePct(+e.target.value);
     });
-    $('volSlider').addEventListener('pointerdown', () => {
-      if (volHideTimer) clearTimeout(volHideTimer);
+    volSlider.addEventListener('change', () => {
+      volInteracting = false;
+      scheduleVolPopoverHide();
     });
-    $('volSlider').addEventListener('pointerup', () => scheduleVolPopoverHide());
-    document.addEventListener('click', e => {
+    if (volPopover) {
+      volPopover.addEventListener('pointerdown', e => e.stopPropagation());
+      volPopover.addEventListener('click', e => e.stopPropagation());
+    }
+    document.addEventListener('pointerdown', e => {
       const pop = $('volPopover');
-      const row = $('playbackRow');
-      if (!pop || pop.hidden || !row) return;
-      if (row.contains(e.target)) return;
+      const btn = $('btnVol');
+      if (!pop || pop.hidden || volInteracting) return;
+      if (pop.contains(e.target) || (btn && btn.contains(e.target))) return;
       hideVolPopover(true);
     });
 
@@ -4560,10 +4751,6 @@
       settingsLocked = !settingsLocked;
       applySettingsLockUi();
       scheduleSaveSettings();
-    });
-
-    $('settingsPanel').addEventListener('toggle', () => {
-      if (settingsLocked) $('settingsPanel').open = true;
     });
 
     $('bufferDelay').addEventListener('input', e => {
@@ -4640,6 +4827,7 @@
       }
     });
 
+    applyVersionUi();
     updateUI();
     restoreSettings().then(() => {
       applyDebugUi();

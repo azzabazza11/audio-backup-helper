@@ -1,23 +1,23 @@
-# Pings Aaron's Apps camp mother whenever hub.json changes.
-# Optional secret HUB_SYNC_TOKEN (classic PAT with repo scope, or fine-grained
-# Contents:Write on azzabazza11/azzabazza11.github.io). Without it, camp mother
-# still picks up changes on its hourly poll.
-name: Notify camp mother
+name: Notify hub (camp mother)
+
 on:
   push:
-    paths: [hub.json]
     branches: [main, master]
+    paths:
+      - 'hub.json'
+
 jobs:
-  ping:
+  notify-hub:
     runs-on: ubuntu-latest
     steps:
-      - name: Dispatch hub-sync
+      - name: Dispatch hub-sync to camp mother
         env:
           GH_TOKEN: ${{ secrets.HUB_SYNC_TOKEN || secrets.HUB_TOKEN }}
         run: |
           if [ -z "$GH_TOKEN" ]; then
-            echo "No HUB_SYNC_TOKEN / HUB_TOKEN on this repo; hub will poll hourly."
+            echo "No HUB_SYNC_TOKEN or HUB_TOKEN secret — camp mother polls hourly. Skipping dispatch."
             exit 0
           fi
           gh api -X POST repos/azzabazza11/azzabazza11.github.io/dispatches \
             -f event_type=hub-sync
+          echo "Dispatched hub-sync to azzabazza11/azzabazza11.github.io"
